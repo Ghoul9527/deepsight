@@ -1,0 +1,20 @@
+{"msg_id":"a1b2c3d4","timestamp_ns":1715299200000000000,"node_id":"host","type":"cmd.servo.set","version":"1.0","payload":{"servo_id":0,"angle":90,"speed":0}}
+{"msg_id":"a1b2c3d5","timestamp_ns":1715299200000100000,"node_id":"host","type":"cmd.winch.set","version":"1.0","payload":{"speed":50,"direction":"down"}}
+{"msg_id":"a1b2c3d6","timestamp_ns":1715299200000200000,"node_id":"host","type":"cmd.winch.stop","version":"1.0","payload":{}}
+{"msg_id":"a1b2c3d7","timestamp_ns":1715299200000300000,"node_id":"host","type":"cmd.lighting.set","version":"1.0","payload":{"channel":0,"brightness":0.8}}
+{"msg_id":"a1b2c3d8","timestamp_ns":1715299200000400000,"node_id":"host","type":"cmd.gopro.record","version":"1.0","payload":{"start":true}}
+{"msg_id":"a1b2c3d9","timestamp_ns":1715299200000500000,"node_id":"host","type":"cmd.gopro.mode","version":"1.0","payload":{"mode":"video"}}
+{"msg_id":"b2c3d4e1","timestamp_ns":1715299200100000000,"node_id":"pico","type":"tel.imu","version":"1.0","payload":{"yaw":15.2,"pitch":-3.1,"roll":1.8,"accel_x":0.01,"accel_y":0.05,"accel_z":1.02}}
+{"msg_id":"b2c3d4e2","timestamp_ns":1715299200100100000,"node_id":"pico","type":"tel.depth","version":"1.0","payload":{"depth_m":12.5,"pressure_mbar":2234.0,"temperature_c":24.3}}
+{"msg_id":"b2c3d4e3","timestamp_ns":1715299200100200000,"node_id":"pico","type":"tel.env","version":"1.0","payload":{"temperature_c":31.2,"humidity_pct":45.0,"pressure_hpa":1013.0}}
+{"msg_id":"b2c3d4e4","timestamp_ns":1715299200100300000,"node_id":"pico","type":"tel.leak","version":"1.0","payload":{"channel":0,"wet":false}}
+{"msg_id":"c3d4e5f1","timestamp_ns":1715299200200000000,"node_id":"stm32","type":"tel.winch_state","version":"1.0","payload":{"position_mm":350.0,"speed_mm_s":0.0,"limit_top":false,"limit_bottom":false,"e_stop_active":false,"motor_current_a":0.5}}
+{"msg_id":"d4e5f6a1","timestamp_ns":1715299200300000000,"node_id":"pi","type":"tel.gopro_status","version":"1.0","payload":{"recording":true,"battery_pct":85.0,"storage_gb_free":180.3,"mode":"video"}}
+{"msg_id":"d4e5f6a2","timestamp_ns":1715299200300100000,"node_id":"pi","type":"tel.pi_status","version":"1.0","payload":{"cpu_temp_c":52.3,"cpu_pct":34.1,"memory_pct":42.7,"uptime_s":3600.0}}
+{"msg_id":"e5f6a7b1","timestamp_ns":1715299200400000000,"node_id":"host","type":"tel.tracking_result","version":"1.0","payload":{"x":0.52,"y":0.48,"w":0.06,"h":0.14,"confidence":0.92,"track_id":1,"visible":true}}
+{"msg_id":"f6a7b8c1","timestamp_ns":1715299200500000000,"node_id":"pi","type":"sys.heartbeat","version":"1.0","payload":{}}
+{"msg_id":"f6a7b8c2","timestamp_ns":1715299200500100000,"node_id":"pi","type":"sys.ack","version":"1.0","payload":{"ref_msg_id":"a1b2c3d4"}}
+{"msg_id":"f6a7b8c3","timestamp_ns":1715299200500200000,"node_id":"pico","type":"sys.error","version":"1.0","payload":{"code":"SERVO_OVERCURRENT","detail":"Servo 3 exceeds current limit 2.0A"}}
+{"msg_id":"f6a7b8c4","timestamp_ns":1715299200500300000,"node_id":"host","type":"sys.safety","version":"1.0","payload":{"state":"SAFE"}}
+{"msg_id":"f6a7b8c5","timestamp_ns":1715299200000000000,"node_id":"pi","type":"sys.startup","version":"1.0","payload":{}}
+{"msg_id":"f6a7b8c6","timestamp_ns":1715299200599900000,"node_id":"pi","type":"sys.shutdown","version":"1.0","payload":{}}

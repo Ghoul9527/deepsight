@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deepsight/protocols/schemas/safety_state.json",
+  "title": "Safety State",
+  "description": "System safety state transition notification.",
+  "type": "object",
+  "required": ["state"],
+  "properties": {
+    "state": {
+      "type": "string",
+      "enum": ["NOMINAL", "DEGRADED", "CAUTION", "SAFE", "EMERGENCY"],
+      "description": "Current safety state"
+    }
+  }
+}

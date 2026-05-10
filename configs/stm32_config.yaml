@@ -1,0 +1,35 @@
+# DeepSight STM32 Winch Controller Configuration
+
+stm32:
+  id: stm32
+  serial_baud: 115200
+
+mock:
+  enabled: true
+
+winch:
+  max_speed_mm_s: 500.0
+  max_travel_mm: 5000.0
+  encoder_ticks_per_mm: 100
+
+motor:
+  mock: true
+  pwm_freq_hz: 20000
+  current_limit_a: 15.0
+
+limit_switches:
+  mock: true
+  top_pin: "PB0"
+  bottom_pin: "PB1"
+
+e_stop:
+  pin: "PB10"
+  active_low: true
+
+control_loop:
+  frequency_hz: 100     # 100 Hz hard realtime loop
+
+safety:
+  max_speed_override: 200.0  # mm/s
+  auto_stop_on_limit: true
+  auto_stop_on_e_stop: true

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepsight-pi"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "deepsight-shared",
+    "fastapi>=0.100",
+    "uvicorn>=0.23",
+    "aiohttp>=3.8",
+    "pyyaml>=6.0",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]

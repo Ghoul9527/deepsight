@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m pytest *)",
+      "Bash(python3 -c *)",
+      "Bash(cd stm32 && make *)",
+      "Bash(python3 -m ruff *)",
+      "Bash(python3 -m mypy *)"
+    ]
+  }
+}

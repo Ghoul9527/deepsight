@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deepsight/protocols/schemas/message_envelope.json",
+  "title": "Message Envelope",
+  "description": "Common envelope for all DeepSight inter-node messages.",
+  "type": "object",
+  "required": ["msg_id", "timestamp_ns", "node_id", "type", "version"],
+  "properties": {
+    "msg_id": {
+      "type": "string",
+      "description": "Unique message identifier"
+    },
+    "timestamp_ns": {
+      "type": "integer",
+      "description": "Nanosecond monotonic clock timestamp"
+    },
+    "node_id": {
+      "type": "string",
+      "enum": ["host", "pi", "pico", "stm32"],
+      "description": "Sending node identifier"
+    },
+    "type": {
+      "type": "string",
+      "description": "Message type from the message catalog"
+    },
+    "version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "payload": {
+      "type": "object",
+      "description": "Type-specific payload"
+    }
+  }
+}

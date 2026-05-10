@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deepsight/protocols/schemas/depth_data.json",
+  "title": "Depth Data",
+  "description": "Depth sensor telemetry from MS5837 pressure sensor.",
+  "type": "object",
+  "required": ["depth_m"],
+  "properties": {
+    "depth_m": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Depth in meters (freshwater)"
+    },
+    "pressure_mbar": {
+      "type": "number",
+      "description": "Absolute pressure in millibar"
+    },
+    "temperature_c": {
+      "type": "number",
+      "description": "Water temperature in Celsius"
+    }
+  }
+}

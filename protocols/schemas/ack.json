@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deepsight/protocols/schemas/ack.json",
+  "title": "Acknowledgment",
+  "description": "Command acknowledgment referencing the original message.",
+  "type": "object",
+  "required": ["ref_msg_id"],
+  "properties": {
+    "ref_msg_id": {
+      "type": "string",
+      "description": "Message ID being acknowledged"
+    }
+  }
+}

@@ -1,0 +1,45 @@
+# DeepSight Host Configuration
+
+host:
+  id: host
+  udp_port: 5005
+  ws_port: 5001
+
+network:
+  pi_address: "127.0.0.1"
+  pi_udp_port: 5100
+  pi_ws_port: 5101
+
+video:
+  stream_url: "tcp://127.0.0.1:8554"  # EmuConsole video; empty = no video
+
+mock:
+  enabled: true
+  video_source: "test_pattern"  # "test_pattern" | "file" | "stream"
+  tracking_target: "synthetic"   # "synthetic" | "none"
+  frame_width: 1920
+  frame_height: 1080
+  fps: 30
+
+tracking:
+  mode: "fast"  # "fast" | "precise"
+  model_path: ""  # empty = download from ultralytics
+  confidence_threshold: 0.5
+  iou_threshold: 0.45
+
+control:
+  pid_p: 0.8
+  pid_i: 0.05
+  pid_d: 0.2
+  max_servo_speed: 60.0  # deg/s
+  dead_zone: 0.02  # fraction of frame center
+
+safety:
+  tracking_lost_hold_s: 0.5
+  tracking_lost_neutral_s: 2.0
+  servo_neutral_angle: 90.0
+
+logging:
+  level: "DEBUG"
+  dir: "logs/host/"
+  telemetry_record: false

@@ -1,0 +1,10 @@
+{"elapsed_s": 0.000, "msg": {"msg_id": "a1", "timestamp_ns": 0, "node_id": "pico", "type": "sys.heartbeat", "payload": {}}}
+{"elapsed_s": 0.010, "msg": {"msg_id": "a2", "timestamp_ns": 10000000, "node_id": "pico", "type": "tel.imu", "payload": {"yaw": 0.1, "pitch": 0.2, "roll": -0.1}}}
+{"elapsed_s": 0.020, "msg": {"msg_id": "a3", "timestamp_ns": 20000000, "node_id": "pico", "type": "tel.depth", "payload": {"depth_m": 0.5}}}
+{"elapsed_s": 0.030, "msg": {"msg_id": "a4", "timestamp_ns": 30000000, "node_id": "pi", "type": "sys.heartbeat", "payload": {}}}
+{"elapsed_s": 0.040, "msg": {"msg_id": "a5", "timestamp_ns": 40000000, "node_id": "pi", "type": "tel.gopro_status", "payload": {"recording": false, "battery_pct": 85.0, "storage_gb_free": 128.0}}}
+{"elapsed_s": 0.050, "msg": {"msg_id": "a6", "timestamp_ns": 50000000, "node_id": "stm32", "type": "sys.heartbeat", "payload": {}}}
+{"elapsed_s": 0.060, "msg": {"msg_id": "a7", "timestamp_ns": 60000000, "node_id": "stm32", "type": "tel.winch_state", "payload": {"position_mm": 2500.0, "speed_mm_s": 0.0, "limit_top": false, "limit_bottom": false, "e_stop_active": false}}}
+{"elapsed_s": 0.100, "msg": {"msg_id": "a8", "timestamp_ns": 100000000, "node_id": "pico", "type": "tel.imu", "payload": {"yaw": 0.2, "pitch": 0.3, "roll": -0.1}}}
+{"elapsed_s": 0.120, "msg": {"msg_id": "a9", "timestamp_ns": 120000000, "node_id": "pico", "type": "tel.depth", "payload": {"depth_m": 1.2}}}
+{"elapsed_s": 0.200, "msg": {"msg_id": "a10", "timestamp_ns": 200000000, "node_id": "pico", "type": "tel.imu", "payload": {"yaw": 0.3, "pitch": 0.5, "roll": -0.2}}}

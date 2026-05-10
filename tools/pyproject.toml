@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepsight-tools"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "deepsight-shared",
+    "click>=8.0",
+    "pyyaml>=6.0",
+    "pyserial>=3.5",
+]
+
+[project.scripts]
+deepsight-cli = "deepsight_tools.cli:main"

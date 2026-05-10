@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deepsight/protocols/schemas/heartbeat.json",
+  "title": "Heartbeat",
+  "description": "Node liveness heartbeat (empty payload).",
+  "type": "object",
+  "required": [],
+  "properties": {}
+}

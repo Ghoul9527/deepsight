@@ -1,0 +1,42 @@
+# DeepSight Raspberry Pi Pico Configuration
+
+pico:
+  id: pico
+  serial_baud: 115200
+
+mock:
+  enabled: true
+
+servo:
+  mock: true
+  i2c_address: 0x40     # PCA9685
+
+imu:
+  mock: true
+  i2c_address: 0x68     # MPU6050
+
+pressure:
+  mock: true
+  i2c_address: 0x76     # MS5837
+
+bme280:
+  mock: true
+  i2c_address: 0x77
+
+lighting:
+  mock: true
+  pwm_freq_hz: 1000
+
+leak_sensor:
+  mock: true
+  channels: 4
+  pin: 26               # GPIO26
+
+control_loop:
+  frequency_hz: 50      # 50 Hz deterministic loop
+
+safety:
+  no_command_timeout_s: 1.0
+  default_servo_angle: 90.0
+  max_servo_angle: 180.0
+  min_servo_angle: 0.0

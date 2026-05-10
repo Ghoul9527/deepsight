@@ -1,0 +1,42 @@
+# DeepSight Raspberry Pi 5 Configuration
+
+pi:
+  id: pi
+  udp_port: 5100
+  ws_port: 5101
+
+network:
+  host_address: "127.0.0.1"
+  host_udp_port: 5005
+  host_ws_port: 5001
+
+serial:
+  pico_port: "mock"             # Real: /dev/ttyAMA0, Mock: mock
+  stm32_port: "mock"            # Real: /dev/ttyAMA1, Mock: mock
+  pico_baud: 115200
+  stm32_baud: 115200
+
+gopro:
+  mock: true
+  usb_vid: "0x05ac"
+  usb_pid: "0x12ab"
+
+capture:
+  mock: true
+  device: "/dev/video0"        # Real HDMI capture device
+  width: 1920
+  height: 1080
+  fps: 60
+
+video:
+  codec: "libx264"              # macOS/linux software; "h264_v4l2m2m" for Pi 5 hardware
+  bitrate: "8M"
+  stream_port: 8554            # TCP MPEG-TS server port (Host connects to this)
+
+watchdog:
+  heartbeat_interval_s: 0.5
+  reconnect_delay_s: 2.0
+
+logging:
+  level: "DEBUG"
+  dir: "logs/pi/"

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deepsight/protocols/schemas/imu_data.json",
+  "title": "IMU Data",
+  "description": "Inertial Measurement Unit telemetry (yaw/pitch/roll + accelerometer).",
+  "type": "object",
+  "required": ["yaw", "pitch", "roll"],
+  "properties": {
+    "yaw": {
+      "type": "number",
+      "description": "Yaw angle degrees"
+    },
+    "pitch": {
+      "type": "number",
+      "description": "Pitch angle degrees"
+    },
+    "roll": {
+      "type": "number",
+      "description": "Roll angle degrees"
+    },
+    "accel_x": {
+      "type": "number",
+      "description": "X-axis acceleration g-force"
+    },
+    "accel_y": {
+      "type": "number",
+      "description": "Y-axis acceleration g-force"
+    },
+    "accel_z": {
+      "type": "number",
+      "description": "Z-axis acceleration g-force"
+    }
+  }
+}
