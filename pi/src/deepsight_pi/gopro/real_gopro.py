@@ -40,7 +40,8 @@ class RealGoPro(GoProController):
 
     def _check_sdk(self):
         try:
-            import open_gopro
+            import open_gopro  # noqa: F401
+            from open_gopro.models.constants import Toggle  # noqa: F401
             self._sdk_available = True
         except ImportError:
             logger.warning("open-gopro SDK not installed. Run: pip install open-gopro")
@@ -99,13 +100,16 @@ class RealGoPro(GoProController):
     # ── Shutter ──────────────────────────────────────
 
     async def start_recording(self) -> bool:
-        return await self._http(lambda g: g.http_command.set_shutter(1))
+        from open_gopro.models.constants import Toggle
+        return await self._http(lambda g: g.http_command.set_shutter(shutter=Toggle.ENABLE))
 
     async def stop_recording(self) -> bool:
-        return await self._http(lambda g: g.http_command.set_shutter(0))
+        from open_gopro.models.constants import Toggle
+        return await self._http(lambda g: g.http_command.set_shutter(shutter=Toggle.DISABLE))
 
     async def take_photo(self) -> bool:
-        return await self._http(lambda g: g.http_command.set_shutter(1))
+        from open_gopro.models.constants import Toggle
+        return await self._http(lambda g: g.http_command.set_shutter(shutter=Toggle.ENABLE))
 
     async def add_hilight(self) -> bool:
         return await self._http(lambda g: g.http_command.add_file_hilight())

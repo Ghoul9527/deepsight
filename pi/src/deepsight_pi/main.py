@@ -92,9 +92,27 @@ class PiNode:
         if await self.encoder.start():
             self._video_task = asyncio.create_task(self._video_loop())
 
+        # Open GoPro USB connection (background, don't block startup)
+        asyncio.create_task(self._connect_gopro())
+
         # Block until shutdown is requested (keeps the asyncio loop alive)
         self._shutdown_event = asyncio.Event()
         await self._shutdown_event.wait()
+
+    async def _connect_gopro(self):
+        """Connect to GoPro in the background with retries."""
+        await asyncio.sleep(2)  # Let startup settle
+        while self.encoder.running:
+            if await self.gopro.is_ready():
+                break
+            try:
+                if await asyncio.wait_for(self.gopro.open(), timeout=10):
+                    logger.info("GoPro connected")
+                    break
+            except asyncio.TimeoutError:
+                pass
+            logger.debug("GoPro not ready, retrying in 5s...")
+            await asyncio.sleep(5)
 
     async def _video_loop(self):
         """Read frames from capture, feed to encoder, repeat."""
@@ -118,6 +136,7 @@ class PiNode:
             self._video_task.cancel()
         await self.encoder.stop()
         await self.capture.stop()
+        await self.gopro.close()
         await self.watchdog.stop()
         await self.router.stop()
         await self.host_link.stop()

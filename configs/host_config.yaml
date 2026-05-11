@@ -6,12 +6,12 @@ host:
   ws_port: 5001
 
 network:
-  pi_address: "127.0.0.1"
+  pi_address: "192.168.20.101"
   pi_udp_port: 5100
   pi_ws_port: 5101
 
 video:
-  stream_url: "tcp://127.0.0.1:8554"  # EmuConsole video; empty = no video
+  stream_url: "tcp://192.168.20.101:8554"  # Pi video stream
 
 mock:
   enabled: true

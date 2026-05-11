@@ -16,6 +16,9 @@ from deepsight_pi.capture.base import CaptureDevice
 
 logger = logging.getLogger("pi.capture.real")
 
+RECONNECT_DELAY = 1.0
+MAX_FAILURES = 5
+
 
 class RealCapture(CaptureDevice):
     """Captures frames from /dev/video0 (USB HDMI dongle) using OpenCV."""
@@ -29,6 +32,7 @@ class RealCapture(CaptureDevice):
         self._cap = None
         self._running = False
         self._frame_count = 0
+        self._failures = 0
         self._last_frame: np.ndarray | None = None
 
     async def start(self) -> bool:
@@ -38,23 +42,34 @@ class RealCapture(CaptureDevice):
             logger.error("OpenCV not installed — cannot capture HDMI")
             return False
 
-        self._cap = cv2.VideoCapture(self._device)
-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        self._cap.set(cv2.CAP_PROP_FPS, self.fps)
-        self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        self._cv2 = cv2
+        self._running = True
+        return self._open_device()
 
-        if not self._cap.isOpened():
+    def _open_device(self) -> bool:
+        cv2 = self._cv2
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+
+        cap = cv2.VideoCapture(self._device)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        cap.set(cv2.CAP_PROP_FPS, self.fps)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+
+        if not cap.isOpened():
             logger.error("Failed to open capture device: %s", self._device)
             return False
 
-        actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        actual_fps = self._cap.get(cv2.CAP_PROP_FPS)
+        self._cap = cap
+        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        self._failures = 0
 
         logger.info("HDMI capture started: %dx%d @ %.1f fps (%s)",
                      actual_w, actual_h, actual_fps, self._device)
-        self._running = True
         return True
 
     async def stop(self) -> bool:
@@ -66,17 +81,26 @@ class RealCapture(CaptureDevice):
         return True
 
     async def read_frame(self) -> np.ndarray | None:
-        if not self._running or self._cap is None:
+        if not self._running:
             return None
+
+        if self._cap is None:
+            await asyncio.sleep(RECONNECT_DELAY)
+            self._open_device()
+            return self._last_frame
 
         # OpenCV read() is blocking — run in thread
         loop = asyncio.get_event_loop()
         ret, frame = await loop.run_in_executor(None, self._cap.read)
 
         if not ret or frame is None:
-            logger.warning("HDMI capture read failure")
+            self._failures += 1
+            if self._failures >= MAX_FAILURES:
+                logger.warning("HDMI capture lost, reconnecting...")
+                self._open_device()
             return self._last_frame
 
+        self._failures = 0
         self._frame_count += 1
         self._last_frame = frame
         return frame

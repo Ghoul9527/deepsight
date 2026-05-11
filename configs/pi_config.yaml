@@ -6,7 +6,7 @@ pi:
   ws_port: 5101
 
 network:
-  host_address: "127.0.0.1"
+  host_address: "192.168.20.14"
   host_udp_port: 5005
   host_ws_port: 5001
 
@@ -17,13 +17,13 @@ serial:
   stm32_baud: 115200
 
 gopro:
-  mock: true
+  mock: false
   usb_vid: "0x05ac"
   usb_pid: "0x12ab"
 
 capture:
-  mock: true
-  device: "/dev/video0"        # Real HDMI capture device
+  mock: false
+  device: "/dev/v4l/by-id/usb-Actions_Micro_UGREEN-25854_-66318299-video-index0"  # Real HDMI capture (persistent path)
   width: 1920
   height: 1080
   fps: 60
