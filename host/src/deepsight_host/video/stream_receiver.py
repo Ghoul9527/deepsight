@@ -184,7 +184,7 @@ class StreamReceiver:
         cap = None
         loop = asyncio.get_running_loop()
 
-        async def _read_frame():
+        def _read_frame():
             """Read a single frame with cap protected by lock."""
             nonlocal cap
             with cap_lock:
