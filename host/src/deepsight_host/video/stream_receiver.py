@@ -179,33 +179,51 @@ class StreamReceiver:
             await self._mock_loop()
             return
 
+        import threading
+        cap_lock = threading.Lock()
         cap = None
         loop = asyncio.get_running_loop()
+
+        async def _read_frame():
+            """Read a single frame with cap protected by lock."""
+            nonlocal cap
+            with cap_lock:
+                if cap is None:
+                    return False, None
+                ret, frame = cap.read()
+            return ret, frame
+
         while self._connected:
             if cap is None:
-                cap = cv2.VideoCapture(self._url)
+                with cap_lock:
+                    cap = cv2.VideoCapture(self._url)
                 await asyncio.sleep(0.5)
-                if not cap.isOpened():
+                with cap_lock:
+                    ok = cap.isOpened()
+                if not ok:
                     logger.debug("Waiting for video stream: %s", self._url)
-                    cap.release()
-                    cap = None
+                    with cap_lock:
+                        cap.release()
+                        cap = None
                     await asyncio.sleep(2.0)
                     continue
                 logger.info("Video stream opened: %s", self._url)
 
             try:
                 ret, frame = await asyncio.wait_for(
-                    loop.run_in_executor(None, cap.read), timeout=5.0)
+                    loop.run_in_executor(None, _read_frame), timeout=5.0)
             except asyncio.TimeoutError:
                 logger.warning("Video frame read timed out, reconnecting...")
-                cap.release()
-                cap = None
+                with cap_lock:
+                    cap.release()
+                    cap = None
                 await asyncio.sleep(1)
                 continue
-            if not ret:
+            if not ret or frame is None:
                 logger.warning("Video frame read failed, reconnecting...")
-                cap.release()
-                cap = None
+                with cap_lock:
+                    cap.release()
+                    cap = None
                 await asyncio.sleep(1)
                 continue
             self._latest_frame = frame
@@ -217,7 +235,8 @@ class StreamReceiver:
             await asyncio.sleep(0)
 
         if cap:
-            cap.release()
+            with cap_lock:
+                cap.release()
 
     def read(self) -> np.ndarray | None:
         """Return the latest received frame (pollable, for Qt timer integration)."""

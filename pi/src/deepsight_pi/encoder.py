@@ -97,6 +97,7 @@ class VideoEncoder:
             )
             self._running = True
             self._frame_count = 0
+            asyncio.create_task(self._drain_stderr())
             return True
         except FileNotFoundError:
             logger.error("ffmpeg not found — install: sudo apt install ffmpeg")
@@ -104,6 +105,18 @@ class VideoEncoder:
         except Exception as e:
             logger.error("Encoder start failed: %s", e)
             return False
+
+    async def _drain_stderr(self):
+        """Read ffmpeg stderr so the pipe never fills and blocks the process."""
+        while self._running and self._proc and self._proc.stderr:
+            try:
+                line = await asyncio.wait_for(
+                    self._proc.stderr.readline(), timeout=1.0)
+                if not line:
+                    break
+                logger.debug("ffmpeg: %s", line.decode().rstrip())
+            except asyncio.TimeoutError:
+                pass
 
     async def encode_frame(self, frame: np.ndarray) -> bool:
         """Feed a raw frame into the encoder. Non-blocking after write."""
