@@ -1,18 +1,21 @@
-"""Real GoPro controller — wired USB-C via open-gopro WiredGoPro.
+"""Real GoPro controller — wired USB-C HTTP API.
 
 Physical topology:
-  GoPro USB-C ──▶ Pi USB 3.0  (control — this module)
-  GoPro MicroHDMI ──▶ Capture dongle ──▶ Pi USB 3.0  (video — CaptureDevice)
+  GoPro MicroHDMI ──▶ Capture dongle ──▶ Pi USB 3.0  (video)
+  GoPro USB-C ──▶ Pi USB 3.0                        (control)
 
-Requires: pip install open-gopro
-Supports Hero 9–13 via USB wired control.
+Camera must be set to "GoPro Connect" mode via Preferences.
+This exposes a USB Ethernet interface (usb0) with HTTP API access.
+No BLE. No WiFi. HDMI output and USB control coexist on HERO13.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import os
-from pathlib import Path
+import re
+import subprocess
+import time
 
 from deepsight_pi.gopro.base import (
     GoProController, GoProStatus, MediaFile, MediaList,
@@ -20,9 +23,15 @@ from deepsight_pi.gopro.base import (
 
 logger = logging.getLogger("pi.gopro.real")
 
+# GoPro USB Ethernet defaults
+GOPRO_USB_IFACE = "usb0"
+GOPRO_HTTP_PORT = 8080
+KEEP_ALIVE_INTERVAL = 120  # ping camera every 2 min to keep WiFi alive
+MAX_STARTUP_WAIT = 10  # seconds to wait for USB interface DHCP
+
 
 class RealGoPro(GoProController):
-    """Wraps open_gopro.WiredGoPro for USB-C wired control.
+    """Wired USB-C GoPro controller.
 
     Usage:
         gopro = RealGoPro()
@@ -32,20 +41,16 @@ class RealGoPro(GoProController):
         await gopro.close()
     """
 
-    def __init__(self):
+    def __init__(self, usb_iface: str = GOPRO_USB_IFACE,
+                 wifi_ssid: str = "", wifi_password: str = ""):
+        self._usb_iface = usb_iface
+        self._wifi_ssid = wifi_ssid
+        self._wifi_password = wifi_password
         self._gopro = None
         self._connected = False
-        self._sdk_available = False
-        self._check_sdk()
-
-    def _check_sdk(self):
-        try:
-            import open_gopro  # noqa: F401
-            from open_gopro.models.constants import Toggle  # noqa: F401
-            self._sdk_available = True
-        except ImportError:
-            logger.warning("open-gopro SDK not installed. Run: pip install open-gopro")
-            self._sdk_available = False
+        self._keep_alive_task: asyncio.Task | None = None
+        self._gopro_ip: str | None = None
+        self._using_wifi = False
 
     # ── Properties ───────────────────────────────────
 
@@ -56,30 +61,215 @@ class RealGoPro(GoProController):
     # ── Connection ───────────────────────────────────
 
     async def open(self) -> bool:
-        if not self._sdk_available:
-            logger.error("open-gopro SDK not installed")
+        """Open wired connection to GoPro via USB-C Ethernet.
+
+        Tries USB Ethernet first (GoPro Connect mode).
+        Falls back to WiFi direct if USB is unavailable.
+        """
+        # Try USB Ethernet first
+        if await self._connect_usb():
+            self._using_wifi = False
+            self._keep_alive_task = asyncio.create_task(self._periodic_keep_alive())
+            return True
+
+        # Fall back to WiFi if configured
+        if self._wifi_ssid:
+            logger.info("USB not available, trying WiFi...")
+            if await self._connect_wifi():
+                self._using_wifi = True
+                self._keep_alive_task = asyncio.create_task(self._periodic_keep_alive())
+                return True
+
+        logger.error("Cannot connect to GoPro: no USB Ethernet or WiFi AP found")
+        return False
+
+    async def _connect_usb(self) -> bool:
+        """Connect to GoPro HTTP API over USB Ethernet (GoPro Connect mode).
+
+        The camera must be in GoPro Connect mode (Preferences → USB → GoPro Connect).
+        This creates a usb0 network interface with IP from camera's DHCP server.
+        HDMI output and USB control coexist on HERO13 in this mode.
+        """
+        try:
+            # Find GoPro IP on USB Ethernet interface
+            gopro_ip = await self._discover_gopro_usb_ip()
+            if not gopro_ip:
+                logger.debug("GoPro USB Ethernet not found on %s", self._usb_iface)
+                return False
+
+            # Verify HTTP API is reachable
+            if not await self._check_http_api(gopro_ip):
+                logger.debug("GoPro HTTP API not reachable at %s:%d",
+                             gopro_ip, GOPRO_HTTP_PORT)
+                return False
+
+            self._gopro_ip = gopro_ip
+            self._gopro = _GoProHTTPClient(gopro_ip, GOPRO_HTTP_PORT)
+            await self._gopro.open()
+            self._connected = True
+            logger.info("GoPro connected via USB Ethernet at %s:%d",
+                        gopro_ip, GOPRO_HTTP_PORT)
+            return True
+
+        except Exception as e:
+            logger.debug("USB connection attempt failed: %s", e)
+            return False
+
+    async def _discover_gopro_usb_ip(self) -> str | None:
+        """Discover GoPro's IP address on the USB Ethernet interface.
+
+        GoPro runs a DHCP server; the Pi gets an IP via DHCP on usb0.
+        The GoPro itself is typically at the gateway address.
+
+        Returns:
+            str: GoPro IP address, or None if not found.
+        """
+        # Wait briefly for DHCP to settle
+        for _ in range(MAX_STARTUP_WAIT):
+            ip_info = await self._get_iface_info(self._usb_iface)
+            if ip_info and ip_info.get("inet"):
+                break
+            await asyncio.sleep(1.0)
+
+        if not ip_info or not ip_info.get("inet"):
+            logger.debug("No IP on %s — is GoPro in GoPro Connect mode?",
+                         self._usb_iface)
+            return None
+
+        # The GoPro is usually the gateway on the USB network
+        gateway = ip_info.get("gateway", "")
+        if gateway and await self._check_http_api(gateway):
+            return gateway
+
+        # Try common GoPro USB IPs
+        candidates = [
+            f"172.20.{x}.1" for x in range(16, 32)
+        ] + [
+            f"172.28.{x}.1" for x in range(0, 16)
+        ]
+        for ip in candidates:
+            if await self._check_http_api(ip):
+                return ip
+
+        return None
+
+    async def _get_iface_info(self, iface: str) -> dict:
+        """Get IP info for a network interface via 'ip' command."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ip", "-4", "-j", "addr", "show", iface,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=3.0
+            )
+            if proc.returncode != 0:
+                return {}
+
+            import json
+            data = json.loads(stdout)
+            if not data:
+                return {}
+
+            addr_info = data[0].get("addr_info", [])
+            result = {}
+            for entry in addr_info:
+                if entry.get("family") == "inet":
+                    result["inet"] = entry.get("local", "")
+                    result["gateway"] = ""  # need 'ip route' for gateway
+                    break
+
+            # Get gateway via 'ip route'
+            if result.get("inet"):
+                route_proc = await asyncio.create_subprocess_exec(
+                    "ip", "-4", "route", "show", "dev", iface, "default",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                route_stdout, _ = await asyncio.wait_for(
+                    route_proc.communicate(), timeout=3.0
+                )
+                if route_proc.returncode == 0 and route_stdout:
+                    m = re.search(r"via\s+([\d.]+)", route_stdout.decode())
+                    if m:
+                        result["gateway"] = m.group(1)
+
+            return result
+        except Exception:
+            return {}
+
+    async def _check_http_api(self, ip: str) -> bool:
+        """Quick check if a GoPro HTTP API is reachable at the given IP."""
+        try:
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1.5)
+            result = sock.connect_ex((ip, GOPRO_HTTP_PORT))
+            sock.close()
+            return result == 0
+        except Exception:
+            return False
+
+    async def _connect_wifi(self) -> bool:
+        """Fallback: connect to GoPro WiFi AP directly via nmcli."""
+        if not self._wifi_ssid:
             return False
 
         try:
-            from open_gopro import WiredGoPro
-            self._gopro = WiredGoPro()
+            # Ensure WiFi is unblocked
+            subprocess.run(
+                ["sudo", "rfkill", "unblock", "wifi"],
+                capture_output=True, timeout=5,
+            )
+
+            # Check if already connected
+            result = subprocess.run(
+                ["nmcli", "-t", "-f", "ACTIVE,SSID", "connection", "show"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if self._wifi_ssid not in result.stdout:
+                logger.info("Connecting to GoPro WiFi AP: %s", self._wifi_ssid)
+                subprocess.run(
+                    ["sudo", "nmcli", "device", "wifi", "connect",
+                     self._wifi_ssid, "password", self._wifi_password,
+                     "ifname", "wlan0"],
+                    capture_output=True, text=True, timeout=15,
+                )
+
+            # GoPro WiFi AP is at fixed IP 10.5.5.9
+            gopro_ip = "10.5.5.9"
+            if not await self._check_http_api(gopro_ip):
+                logger.error("GoPro HTTP API not reachable over WiFi at %s", gopro_ip)
+                return False
+
+            self._gopro_ip = gopro_ip
+            self._gopro = _GoProHTTPClient(gopro_ip, GOPRO_HTTP_PORT)
             await self._gopro.open()
             self._connected = True
-            logger.info("GoPro connected via USB-C")
-
-            # Sync clock
-            try:
-                await self._gopro.http_command.set_date_time_tz_dst()
-            except Exception:
-                pass
-
+            logger.info("GoPro connected via WiFi AP at %s:%d",
+                        gopro_ip, GOPRO_HTTP_PORT)
             return True
+
         except Exception as e:
-            logger.error("GoPro USB open failed: %s", e)
-            self._gopro = None
+            logger.error("WiFi connection failed: %s", e)
             return False
 
+    async def _periodic_keep_alive(self):
+        """Send periodic requests to prevent GoPro auto-shutdown."""
+        await asyncio.sleep(KEEP_ALIVE_INTERVAL)
+        while self._connected:
+            try:
+                await self.get_battery_pct()
+            except Exception:
+                pass
+            await asyncio.sleep(KEEP_ALIVE_INTERVAL)
+
     async def close(self):
+        self._connected = False
+        if self._keep_alive_task:
+            self._keep_alive_task.cancel()
+            self._keep_alive_task = None
         if self._gopro is not None:
             try:
                 await self._gopro.close()
@@ -87,7 +277,6 @@ class RealGoPro(GoProController):
                 logger.debug("GoPro close error: %s", e)
             finally:
                 self._gopro = None
-        self._connected = False
 
     async def is_ready(self) -> bool:
         if self._gopro is None:
@@ -100,16 +289,16 @@ class RealGoPro(GoProController):
     # ── Shutter ──────────────────────────────────────
 
     async def start_recording(self) -> bool:
-        from open_gopro.models.constants import Toggle
-        return await self._http(lambda g: g.http_command.set_shutter(shutter=Toggle.ENABLE))
+        return await self._http(lambda g: g.http_command.set_shutter(
+            _Toggle.ENABLE))
 
     async def stop_recording(self) -> bool:
-        from open_gopro.models.constants import Toggle
-        return await self._http(lambda g: g.http_command.set_shutter(shutter=Toggle.DISABLE))
+        return await self._http(lambda g: g.http_command.set_shutter(
+            _Toggle.DISABLE))
 
     async def take_photo(self) -> bool:
-        from open_gopro.models.constants import Toggle
-        return await self._http(lambda g: g.http_command.set_shutter(shutter=Toggle.ENABLE))
+        return await self._http(lambda g: g.http_command.set_shutter(
+            _Toggle.ENABLE))
 
     async def add_hilight(self) -> bool:
         return await self._http(lambda g: g.http_command.add_file_hilight())
@@ -167,20 +356,17 @@ class RealGoPro(GoProController):
         return await self._get_dict(lambda g: g.http_command.get_camera_state())
 
     async def _set_http_setting(self, name: str, value) -> bool:
-        """Set a setting via http_setting by attribute name."""
         return await self._http(lambda g: _set_attr(g.http_setting, name, value))
 
     # ── Status ───────────────────────────────────────
 
     async def get_status(self) -> GoProStatus:
         try:
-            state = await self._gopro.http_command.get_camera_state()
-            s = state.data if hasattr(state, 'data') else {}
+            resp = await self._gopro.http_command.get_camera_state()
+            s = resp.data if hasattr(resp, 'data') else {}
         except Exception:
             return GoProStatus()
 
-        # WiredGoPro returns camera state as a dict or object
-        # Keys vary by firmware; use safe gets
         try:
             status_dict = s.get("status", s) if isinstance(s, dict) else vars(s)
         except TypeError:
@@ -195,7 +381,7 @@ class RealGoPro(GoProController):
             encoding=bool(_safe_get(status_dict, "encoding_active", 0)),
             busy=bool(_safe_get(status_dict, "system_busy", 0)),
             overheating=bool(_safe_get(status_dict, "overheating", 0)),
-            usb_connected=bool(_safe_get(status_dict, "usb_connected", 1)),
+            usb_connected=True,
         )
 
     async def get_battery_pct(self) -> float:
@@ -246,9 +432,10 @@ class RealGoPro(GoProController):
             return MediaList()
 
     async def download_file(self, remote_path: str, local_dir: str) -> str | None:
+        from pathlib import Path
         Path(local_dir).mkdir(parents=True, exist_ok=True)
-        fname = os.path.basename(remote_path)
-        local = os.path.join(local_dir, fname)
+        fname = remote_path.split("/")[-1]
+        local = str(Path(local_dir) / fname)
 
         resp = await self._http(
             lambda g: g.http_command.download_file(url=remote_path))
@@ -274,8 +461,7 @@ class RealGoPro(GoProController):
             lambda g: g.http_command.delete_file(url=remote_path))
 
     async def delete_all_media(self) -> bool:
-        return await self._http(
-            lambda g: g.http_command.delete_all_media())
+        return await self._http(lambda g: g.http_command.delete_all_media())
 
     async def get_thumbnail(self, remote_path: str) -> bytes | None:
         resp = await self._http(
@@ -287,7 +473,7 @@ class RealGoPro(GoProController):
             lambda g: g.http_command.get_telemetry(url=remote_path))
         return resp.data if hasattr(resp, 'data') else None
 
-    # ── USB turbo transfer ───────────────────────────
+    # ── Turbo transfer ───────────────────────────────
 
     async def set_turbo_mode(self, enable: bool) -> bool:
         return await self._http(
@@ -296,11 +482,10 @@ class RealGoPro(GoProController):
     # ── Power ────────────────────────────────────────
 
     async def power_off(self) -> bool:
-        # Power down over USB — may not work on all models
-        return await self._http(lambda g: g.http_command.reboot())  # closest available
+        return await self._http(lambda g: g.http_command.power_down())
 
     async def sleep(self) -> bool:
-        return False  # Not available over HTTP/wired
+        return await self._http(lambda g: g.http_command.sleep())
 
     async def reboot(self) -> bool:
         return await self._http(lambda g: g.http_command.reboot())
@@ -321,7 +506,7 @@ class RealGoPro(GoProController):
             lambda g: g.http_command.get_camera_info())
 
     async def get_camera_capabilities(self) -> dict:
-        return {}  # Not available over HTTP alone
+        return {}
 
     # ── Internal helpers ─────────────────────────────
 
@@ -336,7 +521,6 @@ class RealGoPro(GoProController):
             return False
 
     async def _get_val(self, get_fn, extract_fn, default):
-        """Get a value: call *get_fn*, extract with *extract_fn*, return *default* on error."""
         if self._gopro is None:
             return default
         try:
@@ -363,8 +547,171 @@ class RealGoPro(GoProController):
             return {}
 
 
+# ── Toggle enum (avoids importing open-gopro just for this) ──
+
+class _Toggle:
+    ENABLE = "ENABLE"
+    DISABLE = "DISABLE"
+
+
+# ── Direct HTTP Client (works over USB Ethernet or WiFi) ──
+
+class _GoProHTTPClient:
+    """Minimal async HTTP client for GoPro HTTP API.
+
+    Works over USB Ethernet (GoPro Connect) or WiFi AP.
+    Wraps aiohttp to provide http_command/http_setting interface.
+    """
+
+    def __init__(self, host: str, port: int):
+        self._base = f"http://{host}:{port}"
+        self._session = None
+
+    async def open(self):
+        import aiohttp
+        self._session = aiohttp.ClientSession()
+        self.http_command = _HTTPCommands(self._session, self._base)
+        self.http_setting = _HTTPSettings(self._session, self._base)
+
+    async def close(self):
+        if self._session:
+            await self._session.close()
+            self._session = None
+
+    async def is_ready(self) -> bool:
+        return self._session is not None
+
+
+class _HTTPCommands:
+    """HTTP command wrapper matching open-gopro's http_command interface."""
+
+    def __init__(self, session, base_url: str):
+        self._s = session
+        self._b = base_url
+
+    async def set_shutter(self, shutter) -> bool:
+        val = 1 if str(shutter).endswith("ENABLE") else 0
+        return await self._get(f"/gopro/camera/shutter/start?enable={val}")
+
+    async def power_down(self) -> bool:
+        return await self._get("/gopro/camera/power_off")
+
+    async def sleep(self) -> bool:
+        return await self._get("/gopro/camera/sleep")
+
+    async def reboot(self) -> bool:
+        return await self._get("/gopro/camera/restart")
+
+    async def load_preset(self, preset) -> bool:
+        return await self._get(f"/gopro/camera/presets/load?id={preset}")
+
+    async def load_preset_group(self, group) -> bool:
+        return await self._get(f"/gopro/camera/presets/set_group?id={group}")
+
+    async def set_date_time_tz_dst(self) -> bool:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        dt = now.strftime("%Y_%m_%d_%H_%M_%S")
+        return await self._get(f"/gopro/camera/date_time?date={dt}")
+
+    async def get_camera_state(self):
+        return await self._get_json("/gopro/camera/state")
+
+    async def get_camera_info(self):
+        return await self._get_json("/gopro/camera/info")
+
+    async def get_media_list(self):
+        return await self._get_json("/gopro/media/list")
+
+    async def get_last_captured_media(self):
+        return await self._get_json("/gopro/media/last_captured")
+
+    async def get_preset_status(self):
+        return await self._get_json("/gopro/camera/presets/get")
+
+    async def add_file_hilight(self) -> bool:
+        return await self._get("/gopro/media/hilight/file?path=last")
+
+    async def set_turbo_mode(self, mode: int) -> bool:
+        return await self._get(f"/gopro/camera/turbo?mode={mode}")
+
+    async def download_file(self, url: str):
+        return await self._get_json(url)
+
+    async def delete_file(self, url: str) -> bool:
+        async with self._s.delete(f"{self._b}{url}") as resp:
+            return resp.status == 200
+
+    async def delete_all_media(self) -> bool:
+        return await self._get("/gopro/media/delete_all")
+
+    async def get_thumbnail(self, url: str):
+        async with self._s.get(f"{self._b}{url}") as resp:
+            return _FakeResponse(await resp.read())
+
+    async def get_telemetry(self, url: str):
+        async with self._s.get(f"{self._b}{url}") as resp:
+            return _FakeResponse(await resp.read())
+
+    async def get_date_time(self):
+        return await self._get_json("/gopro/camera/date_time")
+
+    async def _get(self, path: str) -> bool:
+        try:
+            async with self._s.get(f"{self._b}{path}") as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
+    async def _get_json(self, path: str):
+        try:
+            async with self._s.get(f"{self._b}{path}") as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return _FakeResponse(data)
+        except Exception:
+            pass
+        return None
+
+
+class _HTTPSettings:
+    """HTTP settings wrapper matching open-gopro's http_setting interface."""
+
+    def __init__(self, session, base_url: str):
+        self._s = session
+        self._b = base_url
+        for name in ["video_resolution", "frame_rate", "video_lens",
+                      "hypersmooth", "video_bit_rate", "max_lens_mod",
+                      "video_aspect_ratio", "profiles", "bit_depth",
+                      "media_format"]:
+            setattr(self, name, _SettingProxy(session, base_url, name))
+
+
+class _SettingProxy:
+    def __init__(self, session, base_url: str, name: str):
+        self._s = session
+        self._b = base_url
+        self._name = name
+
+    async def set(self, value) -> bool:
+        try:
+            async with self._s.get(
+                f"{self._b}/gopro/camera/setting?setting={self._name}&value={value}"
+            ) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
+
+class _FakeResponse:
+    """Minimal object mimicking open-gopro's GoProResp for code compatibility."""
+    def __init__(self, data):
+        self.data = data
+
+
+# ── Module-level helpers ─────────────────────────────
+
 def _set_attr(obj, name: str, value):
-    """Set a dotted attribute on *obj*."""
     parts = name.split(".")
     target = obj
     for p in parts[:-1]:
@@ -374,7 +721,6 @@ def _set_attr(obj, name: str, value):
 
 
 def _safe_get(d, key, default):
-    """Safe dict get that also tries attribute access."""
     if isinstance(d, dict):
         return d.get(key, default)
     return getattr(d, key, default)

@@ -43,7 +43,7 @@ class VideoPreviewWidget(QWidget):
             "background: rgba(0, 0, 0, 160); color: #00ff88; font-size: 14px; "
             "font-weight: bold; padding: 4px 8px; border-radius: 3px;"
         )
-        self._overlay_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self._overlay_label.setAlignment(Qt.AlignCenter)
         self._overlay_label.setMinimumWidth(160)
 
         I18n.instance().language_changed.connect(self._retranslate)
@@ -52,7 +52,7 @@ class VideoPreviewWidget(QWidget):
         if self._raw_pixmap is None:
             self._label.setText(tr("video.no_video"))
 
-    def update_frame(self, frame: np.ndarray, fps: float = 0.0):
+    def update_frame(self, frame: np.ndarray, fps: float = 0.0, latency_ms: float = 0.0):
         if frame is None:
             return
         self._frame_h, self._frame_w = frame.shape[:2]
@@ -60,12 +60,14 @@ class VideoPreviewWidget(QWidget):
         self._raw_pixmap = VideoDisplay.frame_to_pixmap(frame)
         self._scale_and_display()
 
-        # Update overlay with resolution + FPS
+        # Update overlay with resolution + FPS + end-to-end latency
         fps_str = f"{fps:.1f}" if fps > 0 else "--"
+        lat_str = f"  {latency_ms:.0f}ms" if latency_ms > 0 else ""
         self._overlay_label.setText(
-            f"  {self._frame_w}x{self._frame_h}  |  {fps_str} FPS  "
+            f"  {self._frame_w}x{self._frame_h}  |  {fps_str} FPS{lat_str}  "
         )
         self._overlay_label.adjustSize()
+        self._position_overlay()
 
     def _scale_and_display(self):
         if self._raw_pixmap is None or self._raw_pixmap.isNull():
@@ -81,6 +83,17 @@ class VideoPreviewWidget(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._scale_and_display()
+        self._position_overlay()
+
+    def _position_overlay(self):
+        """Pin overlay to bottom-left of the parent label."""
+        label = self._label
+        overlay = self._overlay_label
+        ow = overlay.width()
+        oh = overlay.height()
+        x = 8
+        y = label.height() - oh - 8
+        overlay.move(x, max(y, 0))
 
     def set_overlay(self, text: str):
         self._overlay_label.setText(text)

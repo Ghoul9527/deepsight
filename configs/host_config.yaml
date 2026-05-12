@@ -6,15 +6,15 @@ host:
   ws_port: 5001
 
 network:
-  pi_address: "192.168.20.101"
+  pi_address: "192.168.20.51"
   pi_udp_port: 5100
   pi_ws_port: 5101
 
 video:
-  stream_url: "tcp://192.168.20.101:8554"  # Pi video stream
+  stream_url: "tcp://192.168.20.51:8554"  # Pi video stream
 
 mock:
-  enabled: true
+  enabled: false
   video_source: "test_pattern"  # "test_pattern" | "file" | "stream"
   tracking_target: "synthetic"   # "synthetic" | "none"
   frame_width: 1920

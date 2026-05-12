@@ -29,6 +29,10 @@ class PiConfig:
 
         g = data.get("gopro", {})
         self.gopro_mock: bool = g.get("mock", True)
+        self.gopro_wifi_ssid: str = g.get("wifi_ssid", "GP25108532")
+        self.gopro_wifi_password: str = g.get("wifi_password", "")
+        self.gopro_wifi_interface: str = g.get("wifi_interface", "wlan0")
+        self.gopro_usb_iface: str = g.get("usb_iface", "usb0")
 
         c = data.get("capture", {})
         self.capture_mock: bool = c.get("mock", True)

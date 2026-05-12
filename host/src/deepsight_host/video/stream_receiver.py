@@ -171,72 +171,142 @@ class StreamReceiver:
                 self._callback(frame)
 
     async def _opencv_loop(self):
-        """Read video stream via OpenCV VideoCapture (RTSP, TCP MPEG-TS, etc.)."""
-        try:
-            import cv2
-        except ImportError:
-            logger.warning("OpenCV not installed, falling back to mock")
-            await self._mock_loop()
-            return
+        """Read TCP MPEG-TS via raw socket + ffmpeg pipe.
 
-        import threading
-        cap_lock = threading.Lock()
-        cap = None
-        loop = asyncio.get_running_loop()
+        Avoids OpenCV VideoCapture's built-in FFmpeg backend which
+        disconnects every ~30s when reading MPEG-TS over TCP.
+        Instead: raw TCP socket -> ffmpeg demuxer -> raw BGR frames -> Python.
+        """
+        import numpy as np
 
-        def _read_frame():
-            """Read a single frame with cap protected by lock."""
-            nonlocal cap
-            with cap_lock:
-                if cap is None:
-                    return False, None
-                ret, frame = cap.read()
-            return ret, frame
+        # Default frame size (updated when first frame arrives)
+        frame_w, frame_h = 1920, 1080
+        frame_bytes = frame_w * frame_h * 3
+        reconnect_delay = 1.0
 
         while self._connected:
-            if cap is None:
-                with cap_lock:
-                    cap = cv2.VideoCapture(self._url)
-                await asyncio.sleep(0.5)
-                with cap_lock:
-                    ok = cap.isOpened()
-                if not ok:
-                    logger.debug("Waiting for video stream: %s", self._url)
-                    with cap_lock:
-                        cap.release()
-                        cap = None
-                    await asyncio.sleep(2.0)
-                    continue
-                logger.info("Video stream opened: %s", self._url)
+            reader: asyncio.StreamReader | None = None
+            writer: asyncio.StreamWriter | None = None
+            ffmpeg_proc: asyncio.subprocess.Process | None = None
+            relay_task: asyncio.Task | None = None
 
             try:
-                ret, frame = await asyncio.wait_for(
-                    loop.run_in_executor(None, _read_frame), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("Video frame read timed out, reconnecting...")
-                with cap_lock:
-                    cap.release()
-                    cap = None
-                await asyncio.sleep(1)
-                continue
-            if not ret or frame is None:
-                logger.warning("Video frame read failed, reconnecting...")
-                with cap_lock:
-                    cap.release()
-                    cap = None
-                await asyncio.sleep(1)
-                continue
-            self._latest_frame = frame
-            self._last_frame_time = time.time()
-            self.width = frame.shape[1]
-            self.height = frame.shape[0]
-            if self._callback:
-                self._callback(frame)
-            await asyncio.sleep(0)
+                # Parse host:port from URL
+                url = self._url
+                if url.startswith("tcp://"):
+                    url = url[6:]
+                host, port_str = url.rsplit(":", 1)
+                port = int(port_str)
 
-        if cap:
-            with cap_lock:
-                cap.release()
+                # Connect to Pi stream relay
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port), timeout=5.0
+                )
+                logger.info("TCP stream connected: %s:%d", host, port)
+
+                # Spawn ffmpeg to decode MPEG-TS → raw BGR frames
+                # Low-latency: nobuffer + low_delay keep per-frame decode fast.
+                # probesize/analyzeduration need headroom for initial SPS/PPS
+                # detection on the MPEG-TS stream (32/0 was too aggressive —
+                # ffmpeg failed to determine resolution and exited immediately).
+                ffmpeg_cmd = [
+                    "ffmpeg",
+                    "-loglevel", "warning",
+                    "-fflags", "nobuffer",
+                    "-flags", "low_delay",
+                    "-probesize", "500000",
+                    "-analyzeduration", "1000000",
+                    "-f", "mpegts",
+                    "-i", "pipe:0",
+                    "-f", "rawvideo",
+                    "-pix_fmt", "bgr24",
+                    "pipe:1",
+                ]
+                ffmpeg_proc = await asyncio.create_subprocess_exec(
+                    *ffmpeg_cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+
+                # Relay: TCP → ffmpeg stdin (background task)
+                async def relay_tcp_to_ffmpeg():
+                    try:
+                        while self._connected and ffmpeg_proc.stdin is not None:
+                            data = await asyncio.wait_for(
+                                reader.read(65536), timeout=5.0
+                            )
+                            if not data:
+                                break
+                            ffmpeg_proc.stdin.write(data)
+                            await ffmpeg_proc.stdin.drain()
+                    except (asyncio.TimeoutError, ConnectionError, OSError):
+                        pass
+                    finally:
+                        # Close ffmpeg stdin so it flushes and exits
+                        try:
+                            if ffmpeg_proc.stdin is not None:
+                                ffmpeg_proc.stdin.close()
+                        except OSError:
+                            pass
+
+                relay_task = asyncio.create_task(relay_tcp_to_ffmpeg())
+
+                # Read decoded frames from ffmpeg stdout
+                while self._connected and ffmpeg_proc.stdout is not None:
+                    try:
+                        raw = await asyncio.wait_for(
+                            ffmpeg_proc.stdout.readexactly(frame_bytes),
+                            timeout=5.0,
+                        )
+                    except asyncio.IncompleteReadError:
+                        break  # ffmpeg closed stdout
+                    frame = np.frombuffer(raw, dtype=np.uint8).reshape(
+                        (frame_h, frame_w, 3)
+                    )
+                    # Update resolution from actual frame size
+                    if frame.shape[1] != frame_w or frame.shape[0] != frame_h:
+                        frame_w, frame_h = frame.shape[1], frame.shape[0]
+                        frame_bytes = frame_w * frame_h * 3
+
+                    # .copy() — ffmpeg stdout buffer is read-only
+                    self._latest_frame = frame.copy()
+                    self._last_frame_time = time.time()
+                    self.width = frame_w
+                    self.height = frame_h
+                    if self._callback:
+                        # .copy() required — ffmpeg stdout buffer is read-only
+                        self._callback(frame.copy())
+
+                relay_task.cancel()
+
+            except (asyncio.TimeoutError, ConnectionError, OSError) as e:
+                logger.debug("TCP stream error: %s", e)
+            except Exception as e:
+                logger.warning("Stream decode error: %s", e)
+            finally:
+                if relay_task is not None:
+                    relay_task.cancel()
+                if ffmpeg_proc is not None:
+                    try:
+                        if ffmpeg_proc.stdin is not None:
+                            ffmpeg_proc.stdin.close()
+                    except OSError:
+                        pass
+                    try:
+                        await ffmpeg_proc.wait()
+                    except OSError:
+                        ffmpeg_proc.kill()
+                        await ffmpeg_proc.wait()
+                if writer is not None:
+                    try:
+                        writer.close()
+                        await writer.wait_closed()
+                    except OSError:
+                        pass
+
+            if self._connected:
+                await asyncio.sleep(reconnect_delay)
 
     def read(self) -> np.ndarray | None:
         """Return the latest received frame (pollable, for Qt timer integration)."""
@@ -244,8 +314,22 @@ class StreamReceiver:
         self._latest_frame = None
         return frame
 
-    def stale(self, threshold: float = 0.5) -> bool:
-        """True if no frame received for `threshold` seconds."""
+    def frame_age_ms(self) -> float:
+        """Return age of the latest frame in milliseconds.
+
+        Measures time since the last frame was decoded — a proxy for
+        end-to-end latency (GoPro → Pi → Host decode).
+        """
+        if self._last_frame_time == 0.0:
+            return 0.0
+        return (time.time() - self._last_frame_time) * 1000.0
+
+    def stale(self, threshold: float = 3.0) -> bool:
+        """True if no frame received for `threshold` seconds.
+
+        Uses a 3s default — long enough to ride out brief encoder/capture
+        interruptions on the Pi side without showing the placeholder.
+        """
         if self._last_frame_time == 0.0:
             return True
         return (time.time() - self._last_frame_time) > threshold

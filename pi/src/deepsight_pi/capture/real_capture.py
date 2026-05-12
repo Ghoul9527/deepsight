@@ -18,6 +18,7 @@ logger = logging.getLogger("pi.capture.real")
 
 RECONNECT_DELAY = 1.0
 MAX_FAILURES = 5
+READ_TIMEOUT = 3.0  # seconds
 
 
 class RealCapture(CaptureDevice):
@@ -34,6 +35,9 @@ class RealCapture(CaptureDevice):
         self._frame_count = 0
         self._failures = 0
         self._last_frame: np.ndarray | None = None
+        self._reconnecting = False
+        self._reconnect_attempts = 0
+        self._last_reconnect_time = 0.0
 
     async def start(self) -> bool:
         try:
@@ -44,7 +48,28 @@ class RealCapture(CaptureDevice):
 
         self._cv2 = cv2
         self._running = True
+        self._disable_usb_autosuspend()
         return self._open_device()
+
+    def _disable_usb_autosuspend(self):
+        """Disable USB autosuspend for the capture device to prevent
+        periodic 5-minute timeouts caused by USB power management."""
+        import glob
+        # The capture device is at a specific V4L2 path; find its USB device
+        v4l_path = self._device
+        # Resolve symlink to get actual device node
+        try:
+            import os
+            real_path = os.path.realpath(v4l_path)
+            # Extract USB device from sysfs: /sys/class/video4linux/videoX/device
+            video_name = os.path.basename(real_path)  # e.g. "video0"
+            power_control = f"/sys/class/video4linux/{video_name}/device/power/control"
+            if os.path.exists(power_control):
+                with open(power_control, "w") as f:
+                    f.write("on")
+                logger.info("USB autosuspend disabled for %s", v4l_path)
+        except (OSError, PermissionError) as e:
+            logger.debug("Could not disable USB autosuspend: %s", e)
 
     def _open_device(self) -> bool:
         cv2 = self._cv2
@@ -84,23 +109,56 @@ class RealCapture(CaptureDevice):
         if not self._running:
             return None
 
-        if self._cap is None:
-            await asyncio.sleep(RECONNECT_DELAY)
-            self._open_device()
+        if self._cap is None or self._reconnecting:
+            await asyncio.sleep(0.001)
             return self._last_frame
 
-        # OpenCV read() is blocking — run in thread
+        # OpenCV read() is blocking — run in thread with timeout
         loop = asyncio.get_event_loop()
-        ret, frame = await loop.run_in_executor(None, self._cap.read)
+        try:
+            ret, frame = await asyncio.wait_for(
+                loop.run_in_executor(None, self._cap.read),
+                timeout=READ_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("HDMI capture read timed out (%.1fs), reconnecting...",
+                           READ_TIMEOUT)
+            # Reconnect in background to avoid blocking the video loop
+            asyncio.create_task(self._reconnect_async())
+            return self._last_frame
 
         if not ret or frame is None:
             self._failures += 1
+            logger.debug("HDMI capture read failed (%d/%d): ret=%s",
+                         self._failures, MAX_FAILURES, ret)
             if self._failures >= MAX_FAILURES:
-                logger.warning("HDMI capture lost, reconnecting...")
-                self._open_device()
+                logger.warning("HDMI capture lost (%d failures), reconnecting...",
+                               self._failures)
+                asyncio.create_task(self._reconnect_async())
             return self._last_frame
 
         self._failures = 0
         self._frame_count += 1
         self._last_frame = frame
         return frame
+
+    async def _reconnect_async(self):
+        """Reopen capture device with exponential backoff."""
+        if self._reconnecting:
+            return
+        self._reconnecting = True
+        try:
+            while self._running:
+                self._reconnect_attempts += 1
+                delay = min(1.0 * (2 ** min(self._reconnect_attempts - 1, 4)),
+                            RECONNECT_DELAY * 10)
+                await asyncio.sleep(delay)
+                if self._open_device():
+                    self._reconnect_attempts = 0
+                    self._last_reconnect_time = time.time()
+                    logger.info("HDMI capture reconnected successfully")
+                    break
+                logger.debug("HDMI capture reconnect attempt %d failed, retrying in %.1fs",
+                             self._reconnect_attempts, delay)
+        finally:
+            self._reconnecting = False

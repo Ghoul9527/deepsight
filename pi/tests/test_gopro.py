@@ -300,7 +300,6 @@ class TestRealGoProNoSDK:
     def test_init_without_sdk(self):
         from deepsight_pi.gopro.real_gopro import RealGoPro
         gopro = RealGoPro()
-        assert gopro._sdk_available is False
         assert gopro.connected is False
 
     def test_open_fails_without_sdk(self):

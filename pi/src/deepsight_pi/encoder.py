@@ -36,6 +36,7 @@ class VideoEncoder:
         self._proc: asyncio.subprocess.Process | None = None
         self._running = False
         self._frame_count = 0
+        self._use_stdout = False
 
     def _build_cmd(self) -> list[str]:
         """Build ffmpeg command line."""
@@ -66,15 +67,15 @@ class VideoEncoder:
             elif self.output.startswith("srt"):
                 cmd += ["-f", "mpegts"]
             elif self.output.startswith("tcp://"):
-                # TCP MPEG-TS server mode — Host connects to this
-                cmd += ["-f", "mpegts"]
-                if "?" not in self.output:
-                    self.output += "?listen=1"
+                # TCP relay mode — output MPEG-TS to stdout for Python relay
+                cmd += ["-f", "mpegts", "pipe:1"]
+                self._use_stdout = True
             elif self.output.endswith(".mp4"):
                 cmd += ["-f", "mp4"]
             else:
                 cmd += ["-f", "mpegts"]
-            cmd += [self.output]
+            if not self._use_stdout:
+                cmd += [self.output]
         else:
             cmd += ["-f", "null", "-"]
 
@@ -92,7 +93,7 @@ class VideoEncoder:
             self._proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE if self._use_stdout else asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
             self._running = True
@@ -146,12 +147,22 @@ class VideoEncoder:
         self._running = False
         try:
             self._proc.stdin.close()
+        except Exception:
+            pass
+        try:
             await self._proc.wait()
         except Exception:
             self._proc.kill()
             await self._proc.wait()
         logger.info("Encoder stopped (%d frames)", self._frame_count)
         self._proc = None
+
+    @property
+    def stdout(self) -> asyncio.StreamReader | None:
+        """ffmpeg stdout as a StreamReader (valid when _use_stdout is True)."""
+        if self._proc is not None and self._use_stdout:
+            return self._proc.stdout
+        return None
 
     @property
     def frame_count(self) -> int:

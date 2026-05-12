@@ -18,15 +18,17 @@ serial:
 
 gopro:
   mock: false
-  usb_vid: "0x05ac"
-  usb_pid: "0x12ab"
+  usb_iface: "usb0"             # USB Ethernet interface for wired control
+  wifi_ssid: "GP25108532"       # Fallback WiFi AP
+  wifi_password: "fZM-HDn-fsg"
+  wifi_interface: "wlan0"
 
 capture:
   mock: false
   device: "/dev/v4l/by-id/usb-Actions_Micro_UGREEN-25854_-66318299-video-index0"  # Real HDMI capture (persistent path)
   width: 1920
   height: 1080
-  fps: 60
+  fps: 30
 
 video:
   codec: "libx264"              # macOS/linux software; "h264_v4l2m2m" for Pi 5 hardware

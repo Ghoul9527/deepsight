@@ -106,6 +106,7 @@ class HostApp:
         self._frame_count = 0
         self._fps_ema = 0.0
         self._last_fps_update = time.monotonic()
+        self._pi_stream_latency_ms: float = 0.0  # PCR-based GoPro→Pi latency
 
         # Timers
         self._frame_timer = QTimer()
@@ -198,6 +199,9 @@ class HostApp:
         if isinstance(self._video_source, StreamReceiver):
             await self._video_source.start()
 
+        # Poll Pi for PCR-based stream latency
+        asyncio.ensure_future(self._poll_pi_stream_latency())
+
     async def _udp_recv_loop(self):
         while self._running:
             try:
@@ -214,14 +218,31 @@ class HostApp:
             except asyncio.TimeoutError:
                 pass
 
+    async def _poll_pi_stream_latency(self):
+        """Poll Pi /stream/status for PCR-based GoPro→Pi latency."""
+        import json
+        from urllib.request import urlopen
+        loop = asyncio.get_event_loop()
+        url = f"http://{self.config.pi_address}:{self.config.pi_ws_port}/stream/status"
+        while self._running:
+            try:
+                resp = await loop.run_in_executor(
+                    None, lambda: urlopen(url, timeout=2))
+                data = json.loads(resp.read())
+                self._pi_stream_latency_ms = float(data.get("pcr_latency_ms", 0))
+            except Exception:
+                pass
+            await asyncio.sleep(2)  # 0.5 Hz poll is plenty
+
     def _process_frame(self):
         frame = self._video_source.read()
         if frame is None:
-            # Only show placeholder when stream is actually dead (>500ms no frame)
+            # Only show placeholder when stream is actually dead (>3s no frame)
             if (isinstance(self._video_source, StreamReceiver)
                     and self._video_source.stale()):
                 frame = self._no_signal_source.read()
                 self._window.video_preview.update_frame(frame, 0.0)
+            # If stream is not stale, keep showing the last good frame (skip)
             return
 
         self._frame_count += 1
@@ -233,6 +254,12 @@ class HostApp:
 
         # Draw overlay on frame
         self._draw_overlay(frame, result)
+
+        # End-to-end latency estimate (ms)
+        #   GoPro→Pi:    210ms FAQ baseline + PCR delta
+        #   Pi→Host:     <1ms Ethernet
+        #   Host→screen: frame_age_ms (ffmpeg decode + Qt display gap)
+        ee_latency = 210.0 + self._pi_stream_latency_ms + self._video_source.frame_age_ms()
 
         # Control: compute servo angles
         if result is not None:
@@ -253,8 +280,8 @@ class HostApp:
                 center_x=0.5, center_y=0.5, lost=True,
             )
 
-        # Update video display
-        self._window.video_preview.update_frame(frame, self._fps_ema)
+        # Update video display (with end-to-end latency)
+        self._window.video_preview.update_frame(frame, self._fps_ema, ee_latency)
 
         # FPS calculation (EMA)
         now = time.monotonic()
