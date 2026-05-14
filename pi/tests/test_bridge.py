@@ -132,13 +132,11 @@ class TestMessageRouter:
         from deepsight_pi.bridge.pico_link import PicoLink
         from deepsight_pi.bridge.stm32_link import Stm32Link
         from deepsight_pi.bridge.message_router import MessageRouter
-        from deepsight_pi.gopro.mock_gopro import MockGoPro
-        from deepsight_pi.capture.mock_capture import MockCapture
 
         cfg = make_cfg()
         return MessageRouter(
             HostLink(cfg), PicoLink(cfg), Stm32Link(cfg),
-            MockGoPro(), MockCapture(),
+            gopro_ready=lambda: True,
         )
 
     def test_router_init(self):

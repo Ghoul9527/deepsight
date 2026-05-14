@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Callable
 
 import numpy as np
 
 logger = logging.getLogger("host.video.receiver")
+
+# Parse "Stream #0:0: Video: h264, ..., 1280x720, ..." from ffmpeg stderr
+_RE_RESOLUTION = re.compile(r"Stream #\d+:\d+.*?Video:.*?\b(\d{3,4})x(\d{3,4})\b")
 
 BUFFER_SIZE = 65536
 
@@ -59,9 +63,24 @@ class StreamReceiver:
                 pass
             self._task = None
 
+    async def restart(self):
+        """Restart the receive loop to pick up a new stream resolution."""
+        logger.info("Restarting video receiver for resolution change")
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        self._connected = True
+        self._task = asyncio.create_task(self._recv_loop())
+
     async def _recv_loop(self):
         if self._mock:
             await self._mock_loop()
+        elif self._url.startswith("udp://"):
+            await self._udp_loop()
         elif self._url.startswith("rtsp://") or self._url.startswith("tcp://"):
             await self._opencv_loop()
         else:
@@ -170,18 +189,162 @@ class StreamReceiver:
             if self._callback:
                 self._callback(frame)
 
+    async def _udp_loop(self):
+        """Read MPEG-TS via UDP — ffmpeg reads the socket directly.
+
+        Lowest-latency path: Pi forwards GoPro UDP datagrams to us, ffmpeg
+        reads them natively (`-i udp://...`). No TCP relay, no pipe relay,
+        no extra buffer copies between network and decoder.
+        """
+        import numpy as np
+
+        reconnect_delay = 1.0
+
+        while self._connected:
+            ffmpeg_proc: asyncio.subprocess.Process | None = None
+            stderr_task: asyncio.Task | None = None
+
+            try:
+                # Parse udp://host:port from URL
+                udp_input = self._url
+                if udp_input.startswith("udp://"):
+                    udp_input = udp_input[6:]
+
+                ffmpeg_cmd = [
+                    "ffmpeg",
+                    "-loglevel", "info",
+                    "-fflags", "nobuffer",
+                    "-flags", "low_delay",
+                    "-probesize", "500000",
+                    "-analyzeduration", "1000000",
+                    "-f", "mpegts",
+                    "-i", f"udp://{udp_input}",
+                    "-f", "rawvideo",
+                    "-pix_fmt", "bgr24",
+                    "pipe:1",
+                ]
+                ffmpeg_proc = await asyncio.create_subprocess_exec(
+                    *ffmpeg_cmd,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+
+                # Parse stderr for resolution (same as TCP path)
+                async def parse_stderr_for_resolution():
+                    detected = None
+                    try:
+                        while ffmpeg_proc.stderr is not None:
+                            line = await asyncio.wait_for(
+                                ffmpeg_proc.stderr.readline(), timeout=10.0
+                            )
+                            if not line:
+                                break
+                            m = _RE_RESOLUTION.search(line.decode(errors="replace"))
+                            if m:
+                                detected = (int(m.group(1)), int(m.group(2)))
+                                logger.info(
+                                    "Detected stream resolution: %dx%d",
+                                    detected[0], detected[1],
+                                )
+                                break
+                    except asyncio.TimeoutError:
+                        logger.debug("Timed out waiting for ffmpeg resolution log")
+                    return detected
+
+                stderr_task = asyncio.create_task(parse_stderr_for_resolution())
+
+                # Wait for resolution detection
+                detected = await asyncio.wait_for(stderr_task, timeout=12.0)
+                if detected is None:
+                    logger.warning(
+                        "Could not detect stream resolution from ffmpeg, "
+                        "falling back to 1280x720"
+                    )
+                    frame_w, frame_h = 1280, 720
+                else:
+                    frame_w, frame_h = detected
+                frame_bytes = frame_w * frame_h * 3
+                self.width = frame_w
+                self.height = frame_h
+
+                # Monitor stderr for mid-stream resolution changes
+                # (e.g. GoPro aspect ratio switch). When detected, kill
+                # ffmpeg so the outer reconnect loop restarts with the new size.
+                async def monitor_stderr():
+                    try:
+                        while ffmpeg_proc.stderr is not None:
+                            line = await asyncio.wait_for(
+                                ffmpeg_proc.stderr.readline(), timeout=5.0)
+                            if not line:
+                                break
+                            m = _RE_RESOLUTION.search(line.decode(errors="replace"))
+                            if m:
+                                new_w, new_h = int(m.group(1)), int(m.group(2))
+                                if new_w != frame_w or new_h != frame_h:
+                                    logger.info(
+                                        "Resolution changed %dx%d -> %dx%d, restarting",
+                                        frame_w, frame_h, new_w, new_h)
+                                    ffmpeg_proc.kill()
+                                    break
+                    except Exception:
+                        pass
+
+                stderr_monitor_task = asyncio.create_task(monitor_stderr())
+
+                # Read decoded frames from ffmpeg stdout
+                while self._connected and ffmpeg_proc.stdout is not None:
+                    try:
+                        raw = await asyncio.wait_for(
+                            ffmpeg_proc.stdout.readexactly(frame_bytes),
+                            timeout=5.0,
+                        )
+                    except asyncio.IncompleteReadError:
+                        break
+
+                    frame = np.frombuffer(raw, dtype=np.uint8).reshape(
+                        (frame_h, frame_w, 3)
+                    ).copy()
+                    self._latest_frame = frame
+                    self._last_frame_time = time.time()
+                    if self._callback:
+                        self._callback(frame)
+
+            except (asyncio.TimeoutError, ConnectionError, OSError) as e:
+                logger.debug("UDP stream error: %s", e)
+            except Exception as e:
+                logger.warning("UDP decode error: %s", e)
+            finally:
+                for t in [stderr_task]:
+                    if t is not None and not t.done():
+                        t.cancel()
+                if 'stderr_monitor_task' in locals() and stderr_monitor_task is not None and not stderr_monitor_task.done():
+                    stderr_monitor_task.cancel()
+                if ffmpeg_proc is not None:
+                    try:
+                        ffmpeg_proc.kill()
+                    except OSError:
+                        pass
+                    try:
+                        await asyncio.wait_for(ffmpeg_proc.wait(), timeout=3.0)
+                    except (asyncio.TimeoutError, OSError):
+                        pass
+
+            if self._connected:
+                await asyncio.sleep(reconnect_delay)
+
     async def _opencv_loop(self):
         """Read TCP MPEG-TS via raw socket + ffmpeg pipe.
 
         Avoids OpenCV VideoCapture's built-in FFmpeg backend which
         disconnects every ~30s when reading MPEG-TS over TCP.
         Instead: raw TCP socket -> ffmpeg demuxer -> raw BGR frames -> Python.
+
+        Resolution is parsed from ffmpeg stderr (e.g. "1280x720") so we read
+        exactly one frame at a time instead of reading misaligned byte chunks.
         """
         import numpy as np
 
-        # Default frame size (updated when first frame arrives)
-        frame_w, frame_h = 1920, 1080
-        frame_bytes = frame_w * frame_h * 3
         reconnect_delay = 1.0
 
         while self._connected:
@@ -189,6 +352,7 @@ class StreamReceiver:
             writer: asyncio.StreamWriter | None = None
             ffmpeg_proc: asyncio.subprocess.Process | None = None
             relay_task: asyncio.Task | None = None
+            stderr_task: asyncio.Task | None = None
 
             try:
                 # Parse host:port from URL
@@ -204,14 +368,11 @@ class StreamReceiver:
                 )
                 logger.info("TCP stream connected: %s:%d", host, port)
 
-                # Spawn ffmpeg to decode MPEG-TS → raw BGR frames
-                # Low-latency: nobuffer + low_delay keep per-frame decode fast.
-                # probesize/analyzeduration need headroom for initial SPS/PPS
-                # detection on the MPEG-TS stream (32/0 was too aggressive —
-                # ffmpeg failed to determine resolution and exited immediately).
+                # Spawn ffmpeg to decode MPEG-TS → raw BGR frames.
+                # stderr is piped so we can extract the real resolution.
                 ffmpeg_cmd = [
                     "ffmpeg",
-                    "-loglevel", "warning",
+                    "-loglevel", "info",
                     "-fflags", "nobuffer",
                     "-flags", "low_delay",
                     "-probesize", "500000",
@@ -226,8 +387,35 @@ class StreamReceiver:
                     *ffmpeg_cmd,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
                 )
+
+                # Read ffmpeg stderr to detect the actual stream resolution.
+                # ffmpeg prints "Stream #0:0: Video: h264, ..., 1280x720, ..."
+                # once it has seen the first SPS. We need this BEFORE reading
+                # rawvideo frames because readexactly must match frame size.
+                async def parse_stderr_for_resolution():
+                    detected = None
+                    try:
+                        while ffmpeg_proc.stderr is not None:
+                            line = await asyncio.wait_for(
+                                ffmpeg_proc.stderr.readline(), timeout=10.0
+                            )
+                            if not line:
+                                break
+                            m = _RE_RESOLUTION.search(line.decode(errors="replace"))
+                            if m:
+                                detected = (int(m.group(1)), int(m.group(2)))
+                                logger.info(
+                                    "Detected stream resolution: %dx%d",
+                                    detected[0], detected[1],
+                                )
+                                break
+                    except asyncio.TimeoutError:
+                        logger.debug("Timed out waiting for ffmpeg resolution log")
+                    return detected
+
+                stderr_task = asyncio.create_task(parse_stderr_for_resolution())
 
                 # Relay: TCP → ffmpeg stdin (background task)
                 async def relay_tcp_to_ffmpeg():
@@ -243,7 +431,6 @@ class StreamReceiver:
                     except (asyncio.TimeoutError, ConnectionError, OSError):
                         pass
                     finally:
-                        # Close ffmpeg stdin so it flushes and exits
                         try:
                             if ffmpeg_proc.stdin is not None:
                                 ffmpeg_proc.stdin.close()
@@ -251,6 +438,44 @@ class StreamReceiver:
                             pass
 
                 relay_task = asyncio.create_task(relay_tcp_to_ffmpeg())
+
+                # Wait for resolution detection (with timeout)
+                detected = await asyncio.wait_for(stderr_task, timeout=12.0)
+                if detected is None:
+                    logger.warning(
+                        "Could not detect stream resolution from ffmpeg, "
+                        "falling back to 1280x720"
+                    )
+                    frame_w, frame_h = 1280, 720
+                else:
+                    frame_w, frame_h = detected
+                frame_bytes = frame_w * frame_h * 3
+                self.width = frame_w
+                self.height = frame_h
+
+                # Monitor stderr for mid-stream resolution changes
+                # (e.g. GoPro aspect ratio switch). When detected, kill
+                # ffmpeg so the outer reconnect loop restarts with the new size.
+                async def monitor_stderr():
+                    try:
+                        while ffmpeg_proc.stderr is not None:
+                            line = await asyncio.wait_for(
+                                ffmpeg_proc.stderr.readline(), timeout=5.0)
+                            if not line:
+                                break
+                            m = _RE_RESOLUTION.search(line.decode(errors="replace"))
+                            if m:
+                                new_w, new_h = int(m.group(1)), int(m.group(2))
+                                if new_w != frame_w or new_h != frame_h:
+                                    logger.info(
+                                        "Resolution changed %dx%d -> %dx%d, restarting",
+                                        frame_w, frame_h, new_w, new_h)
+                                    ffmpeg_proc.kill()
+                                    break
+                    except Exception:
+                        pass
+
+                stderr_monitor_task = asyncio.create_task(monitor_stderr())
 
                 # Read decoded frames from ffmpeg stdout
                 while self._connected and ffmpeg_proc.stdout is not None:
@@ -261,22 +486,14 @@ class StreamReceiver:
                         )
                     except asyncio.IncompleteReadError:
                         break  # ffmpeg closed stdout
+
                     frame = np.frombuffer(raw, dtype=np.uint8).reshape(
                         (frame_h, frame_w, 3)
-                    )
-                    # Update resolution from actual frame size
-                    if frame.shape[1] != frame_w or frame.shape[0] != frame_h:
-                        frame_w, frame_h = frame.shape[1], frame.shape[0]
-                        frame_bytes = frame_w * frame_h * 3
-
-                    # .copy() — ffmpeg stdout buffer is read-only
-                    self._latest_frame = frame.copy()
+                    ).copy()
+                    self._latest_frame = frame
                     self._last_frame_time = time.time()
-                    self.width = frame_w
-                    self.height = frame_h
                     if self._callback:
-                        # .copy() required — ffmpeg stdout buffer is read-only
-                        self._callback(frame.copy())
+                        self._callback(frame)
 
                 relay_task.cancel()
 
@@ -285,8 +502,11 @@ class StreamReceiver:
             except Exception as e:
                 logger.warning("Stream decode error: %s", e)
             finally:
-                if relay_task is not None:
-                    relay_task.cancel()
+                for t in [relay_task, stderr_task]:
+                    if t is not None and not t.done():
+                        t.cancel()
+                if 'stderr_monitor_task' in locals() and stderr_monitor_task is not None and not stderr_monitor_task.done():
+                    stderr_monitor_task.cancel()
                 if ffmpeg_proc is not None:
                     try:
                         if ffmpeg_proc.stdin is not None:
@@ -294,10 +514,13 @@ class StreamReceiver:
                     except OSError:
                         pass
                     try:
-                        await ffmpeg_proc.wait()
-                    except OSError:
                         ffmpeg_proc.kill()
-                        await ffmpeg_proc.wait()
+                    except OSError:
+                        pass
+                    try:
+                        await asyncio.wait_for(ffmpeg_proc.wait(), timeout=3.0)
+                    except (asyncio.TimeoutError, OSError):
+                        pass
                 if writer is not None:
                     try:
                         writer.close()

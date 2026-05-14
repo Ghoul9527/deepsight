@@ -43,14 +43,13 @@ class PicoLink:
             self._recv_task = asyncio.create_task(self._recv_loop())
             logger.info("PicoLink: connected")
         except Exception as e:
-            logger.error("PicoLink: failed to open %s — %s", self._port, e)
-            # Fall back to mock to keep the system running
-            self._port = "mock"
+            logger.warning("PicoLink: failed to open %s — %s", self._port, e)
 
     async def send(self, msg: Message):
         """Send a JSONL-encoded message to the Pico over UART."""
-        if self._port == "mock":
-            logger.debug("[MOCK→Pico] %s", msg.type)
+        if self._port == "mock" or self._writer is None:
+            if self._port == "mock":
+                logger.debug("[MOCK→Pico] %s", msg.type)
             return
 
         try:

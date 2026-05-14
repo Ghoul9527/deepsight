@@ -22,6 +22,7 @@ class VideoPreviewWidget(QWidget):
         self._last_frame: np.ndarray | None = None
         self._frame_w: int = 0
         self._frame_h: int = 0
+        self._target_aspect: tuple[int, int] | None = None  # (w, h) for cropping
         self._setup_ui()
 
     def _setup_ui(self):
@@ -52,10 +53,19 @@ class VideoPreviewWidget(QWidget):
         if self._raw_pixmap is None:
             self._label.setText(tr("video.no_video"))
 
+    def set_target_aspect(self, ratio: tuple[int, int] | None):
+        """Set target aspect ratio for cropping (e.g., (16, 9) or None for native)."""
+        self._target_aspect = ratio
+
     def update_frame(self, frame: np.ndarray, fps: float = 0.0, latency_ms: float = 0.0):
         if frame is None:
             return
         self._frame_h, self._frame_w = frame.shape[:2]
+
+        # Crop to target aspect ratio if set
+        if self._target_aspect is not None:
+            frame = self._crop_to_aspect(frame, self._target_aspect)
+
         self._last_frame = frame.copy()
         self._raw_pixmap = VideoDisplay.frame_to_pixmap(frame)
         self._scale_and_display()
@@ -63,11 +73,34 @@ class VideoPreviewWidget(QWidget):
         # Update overlay with resolution + FPS + end-to-end latency
         fps_str = f"{fps:.1f}" if fps > 0 else "--"
         lat_str = f"  {latency_ms:.0f}ms" if latency_ms > 0 else ""
+        h, w = frame.shape[:2]
         self._overlay_label.setText(
-            f"  {self._frame_w}x{self._frame_h}  |  {fps_str} FPS{lat_str}  "
+            f"  {w}x{h}  |  {fps_str} FPS{lat_str}  "
         )
         self._overlay_label.adjustSize()
         self._position_overlay()
+
+    @staticmethod
+    def _crop_to_aspect(frame: np.ndarray, target: tuple[int, int]) -> np.ndarray:
+        """Center-crop frame to the target aspect ratio."""
+        h, w = frame.shape[:2]
+        tw, th = target
+        target_ratio = tw / th
+        current_ratio = w / h
+
+        if abs(current_ratio - target_ratio) < 0.02:
+            return frame  # Already close enough
+
+        if current_ratio > target_ratio:
+            # Frame too wide — crop width
+            new_w = int(h * target_ratio)
+            offset = (w - new_w) // 2
+            return frame[:, offset:offset + new_w]
+        else:
+            # Frame too tall — crop height
+            new_h = int(w / target_ratio)
+            offset = (h - new_h) // 2
+            return frame[offset:offset + new_h, :]
 
     def _scale_and_display(self):
         if self._raw_pixmap is None or self._raw_pixmap.isNull():

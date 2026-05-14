@@ -118,36 +118,57 @@ class RealGoPro(GoProController):
     async def _discover_gopro_usb_ip(self) -> str | None:
         """Discover GoPro's IP address on the USB Ethernet interface.
 
-        GoPro runs a DHCP server; the Pi gets an IP via DHCP on usb0.
-        The GoPro itself is typically at the gateway address.
+        GoPro runs a DHCP server; the Pi gets an IP via DHCP.
+        The GoPro itself may be at the gateway (.1) or at a host address
+        (.51, .101, etc.) depending on firmware version.
 
         Returns:
             str: GoPro IP address, or None if not found.
         """
-        # Wait briefly for DHCP to settle
+        # Try known GoPro USB-C Ethernet IPs first (fast path)
+        known_ips = [
+            "172.25.132.51",
+            "172.28.128.51",
+            "172.20.16.51",
+            "172.20.17.51",
+            "172.20.18.51",
+            "172.20.19.51",
+        ]
+        for ip in known_ips:
+            if await self._check_http_api(ip):
+                logger.info("GoPro found at known IP: %s", ip)
+                return ip
+
+        # Wait for DHCP on the USB interface, then scan its subnet
         for _ in range(MAX_STARTUP_WAIT):
             ip_info = await self._get_iface_info(self._usb_iface)
             if ip_info and ip_info.get("inet"):
                 break
             await asyncio.sleep(1.0)
 
-        if not ip_info or not ip_info.get("inet"):
-            logger.debug("No IP on %s — is GoPro in GoPro Connect mode?",
-                         self._usb_iface)
-            return None
+        if ip_info and ip_info.get("inet"):
+            gateway = ip_info.get("gateway", "")
+            if gateway and await self._check_http_api(gateway):
+                return gateway
+            # Scan the local subnet
+            local_ip = ip_info["inet"]
+            parts = local_ip.rsplit(".", 2)
+            if len(parts) >= 2:
+                subnet = f"{parts[0]}.{parts[1]}"
+                for host in [1, 51, 101, 151]:
+                    candidate = f"{subnet}.{host}"
+                    if candidate == local_ip:
+                        continue
+                    if await self._check_http_api(candidate):
+                        return candidate
 
-        # The GoPro is usually the gateway on the USB network
-        gateway = ip_info.get("gateway", "")
-        if gateway and await self._check_http_api(gateway):
-            return gateway
-
-        # Try common GoPro USB IPs
-        candidates = [
-            f"172.20.{x}.1" for x in range(16, 32)
-        ] + [
-            f"172.28.{x}.1" for x in range(0, 16)
-        ]
-        for ip in candidates:
+        # Fallback: scan gateway addresses across common subnets
+        subnet_gateways = (
+            [f"172.20.{x}.1" for x in range(16, 32)] +
+            [f"172.28.{x}.1" for x in range(0, 16)] +
+            [f"172.25.{x}.1" for x in range(128, 144)]
+        )
+        for ip in subnet_gateways:
             if await self._check_http_api(ip):
                 return ip
 

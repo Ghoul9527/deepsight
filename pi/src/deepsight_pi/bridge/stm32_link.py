@@ -42,13 +42,13 @@ class Stm32Link:
             self._recv_task = asyncio.create_task(self._recv_loop())
             logger.info("Stm32Link: connected")
         except Exception as e:
-            logger.error("Stm32Link: failed to open %s — %s", self._port, e)
-            self._port = "mock"
+            logger.warning("Stm32Link: failed to open %s — %s", self._port, e)
 
     async def send(self, msg: Message):
         """Send a JSONL-encoded message to the STM32 over UART."""
-        if self._port == "mock":
-            logger.debug("[MOCK→STM32] %s", msg.type)
+        if self._port == "mock" or self._writer is None:
+            if self._port == "mock":
+                logger.debug("[MOCK→STM32] %s", msg.type)
             return
 
         try:

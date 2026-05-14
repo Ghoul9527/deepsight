@@ -143,13 +143,14 @@ class TestMockGoPro:
         async_test(g.open())
         assert async_test(g.load_preset_group(0)) is True
         status = async_test(g.get_preset_status())
-        assert status["mode"] == "video"
+        assert status["group_id"] == 1000
+        assert len(status["presets"]) > 0
 
     def test_get_preset_status(self, g):
         async_test(g.open())
         s = async_test(g.get_preset_status())
-        assert "group" in s
-        assert "mode" in s
+        assert "presets" in s
+        assert "active_preset_id" in s
 
     def test_set_video_resolution(self, g):
         async_test(g.open())

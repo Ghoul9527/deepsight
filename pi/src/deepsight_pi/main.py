@@ -12,6 +12,7 @@ from deepsight_pi.bridge.host_link import HostLink
 from deepsight_pi.bridge.pico_link import PicoLink
 from deepsight_pi.bridge.stm32_link import Stm32Link
 from deepsight_pi.bridge.message_router import MessageRouter
+from deepsight_pi.bridge.gopro_proxy import GoProProxy
 from deepsight_pi.gopro import create_gopro
 from deepsight_pi.capture import create_capture
 from deepsight_pi.encoder import VideoEncoder
@@ -57,6 +58,12 @@ class PiNode:
 
         # GoPro USB stream manager (Viewfinder / Webcam modes)
         self.stream_manager = GoProStreamManager()
+        self.stream_manager.set_forward_target(
+            self.config.host_address, self.config.host_video_port
+        )
+
+        # GoPro HTTP reverse proxy (Host → Pi → GoPro)
+        self.gopro_proxy = GoProProxy(listen_port=8080)
 
         # Communication
         self.host_link = HostLink(self.config)
@@ -64,7 +71,7 @@ class PiNode:
         self.stm32_link = Stm32Link(self.config)
         self.router = MessageRouter(
             self.host_link, self.pico_link, self.stm32_link,
-            self.gopro, self.capture,
+            gopro_ready=lambda: self.gopro_proxy.gopro_reachable,
         )
 
         # API
@@ -99,27 +106,52 @@ class PiNode:
         # Start API
         await self.api.start()
 
+        # Start HTTP proxy (before GoPro is detected — will 502 until then)
+        await self.gopro_proxy.start()
+
         # Start video pipeline: GoPro USB stream → relay → Host
         asyncio.create_task(self._start_gopro_stream())
 
         # Open GoPro USB connection (background, don't block startup)
         asyncio.create_task(self._connect_gopro())
 
+        # Run startup check after a short delay (covers mock mode)
+        asyncio.create_task(self._delayed_startup_check())
+
         # Block until shutdown is requested (keeps the asyncio loop alive)
         self._shutdown_event = asyncio.Event()
         await self._shutdown_event.wait()
 
     async def _start_gopro_stream(self):
-        """Detect GoPro IP on USB Ethernet, then start viewfinder stream."""
-        await asyncio.sleep(3)  # Let USB Ethernet settle
-        gopro_ip = await self._detect_gopro_ip()
-        if gopro_ip:
-            self.stream_manager.set_gopro_ip(gopro_ip)
-            logger.info("GoPro detected at %s, starting viewfinder stream...", gopro_ip)
-            await self.stream_manager.start_viewfinder(self.stream_relay)
-        else:
-            logger.warning("GoPro not detected on USB Ethernet, "
-                           "stream will start once GoPro connects")
+        """Persistent GoPro stream with reconnection on disconnect.
+
+        GoPro USB Ethernet can drop and re-appear (cable, power, mode switch).
+        This loop re-detects the IP, updates the proxy + stream manager, and
+        restarts the viewfinder whenever the stream goes silent for >30s.
+        """
+        import time as time_mod
+        await asyncio.sleep(3)  # Let USB Ethernet settle on first boot
+
+        while not hasattr(self, '_shutdown_event') or not self._shutdown_event.is_set():
+            gopro_ip = await self._detect_gopro_ip()
+            if gopro_ip:
+                logger.info("GoPro detected at %s, starting viewfinder stream...", gopro_ip)
+                self.stream_manager.set_gopro_ip(gopro_ip)
+                self.gopro_proxy.set_gopro_ip(gopro_ip)
+                await self.stream_manager.start_viewfinder(self.stream_relay)
+
+                # Monitor stream health — if silent for 30s, GoPro likely
+                # disconnected, so stop and re-detect.
+                while self.stream_manager.running:
+                    await asyncio.sleep(5)
+                    silence = time_mod.monotonic() - self.stream_manager._last_data_time
+                    if silence > 30:
+                        logger.warning("Stream silent for %.0fs, reconnecting...", silence)
+                        await self.stream_manager.stop()
+                        break
+            else:
+                logger.debug("GoPro not detected on USB Ethernet, retrying in 5s...")
+                await asyncio.sleep(5)
 
     async def _connect_gopro(self):
         """Connect to GoPro in the background with exponential backoff.
@@ -137,6 +169,8 @@ class PiNode:
                 if await asyncio.wait_for(self.gopro.open(), timeout=10):
                     logger.info("GoPro connected")
                     retry_delay = 5  # reset backoff
+                    # Run startup self-check once connected
+                    asyncio.create_task(self.router.startup_check())
                     break
             except asyncio.TimeoutError:
                 pass
@@ -233,6 +267,11 @@ class PiNode:
                 await asyncio.sleep(0.5)
             await asyncio.sleep(0)
 
+    async def _delayed_startup_check(self):
+        """Run startup self-check after a short delay (for mock mode)."""
+        await asyncio.sleep(5)
+        await self.router.startup_check()
+
     async def shutdown(self):
         logger.info("Shutting down Pi node...")
         if hasattr(self, '_shutdown_event'):
@@ -244,6 +283,7 @@ class PiNode:
         await self.encoder.stop()
         await self.capture.stop()
         await self.gopro.close()
+        await self.gopro_proxy.stop()
         await self.watchdog.stop()
         await self.router.stop()
         await self.host_link.stop()

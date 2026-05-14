@@ -28,9 +28,12 @@ from deepsight_host.control.pid import PIDController
 from deepsight_host.control.controller import GameController
 from deepsight_host.logging.structured_logger import setup_logging
 from deepsight_host.logging.telemetry_recorder import TelemetryRecorder
+from deepsight_host.diagnostics.startup_check import StartupCheck
+from deepsight_host.gopro import GoProClient
 
 from deepsight_shared.protocol import (
-    make_heartbeat, cmd_servo_set, sys_safety, Message,
+    make_heartbeat, cmd_servo_set, sys_safety, sys_ping,
+    cmd_startup_check, Message,
 )
 
 logger = logging.getLogger("host.app")
@@ -48,6 +51,7 @@ class HostApp:
         # Qt
         self._qt_app = QApplication(sys.argv)
         self._window = MainWindow()
+        self._window.set_config(self.config)
 
         # Async event loop (runs in background thread for network I/O)
         self._async_loop = asyncio.new_event_loop()
@@ -99,8 +103,19 @@ class HostApp:
         # Game controller input
         self._controller = GameController()
 
+        # GoPro HTTP client (talks to Pi reverse proxy)
+        self._gopro = GoProClient(
+            f"http://{self.config.pi_address}:8080")
+
         # Session recording
         self._recorder = TelemetryRecorder()
+
+        # Startup self-check
+        self._startup_check = StartupCheck()
+        self._first_frame_seen = False
+
+        # Preset switch guard — cancel stale restarts on rapid switching
+        self._restart_gen = 0
 
         # Performance tracking
         self._frame_count = 0
@@ -151,6 +166,22 @@ class HostApp:
                 "precise" if self.config.tracking_mode == "fast" else "fast"
             ))
 
+        # GoPro commands → direct HTTP through Pi proxy
+        self._window.gopro_command.connect(self._on_gopro_command)
+        self._window.gopro_probe.connect(self._on_gopro_probe)
+        self._window.gopro_get_presets.connect(self._on_get_presets)
+        self._window.gopro_load_preset.connect(self._on_load_preset)
+
+        # Startup self-check wiring
+        self._startup_check.set_send_udp(
+            lambda: self._schedule_async(
+                self._udp.send(sys_ping("host", 0))))
+        self._startup_check.set_send_startup_check(
+            lambda: self._schedule_async(
+                self._udp.send(cmd_startup_check("host"))))
+        self._startup_check.check_result.connect(self._on_check_result)
+        self._startup_check.all_done.connect(self._on_check_all_done)
+
     def run(self):
         logger.info("Starting DeepSight Host...")
         self._running = True
@@ -169,6 +200,9 @@ class HostApp:
         self._controller.start()
         self._recorder.start()
         self._update_tracking_status()
+
+        # Start startup self-check (delayed, let network settle)
+        QTimer.singleShot(1000, self._startup_check.start)
         model_ok = not getattr(self._tracker, 'is_mock', True)
         stream_ok = bool(self.config.stream_url)
         parts = [
@@ -195,12 +229,16 @@ class HostApp:
         asyncio.ensure_future(self._udp_recv_loop())
         asyncio.ensure_future(self._ws_recv_loop())
 
+        # Start GoPro HTTP client (talks through Pi proxy)
+        await self._gopro.open()
+
         # Start video stream receiver if using real stream (not mock)
         if isinstance(self._video_source, StreamReceiver):
             await self._video_source.start()
 
-        # Poll Pi for PCR-based stream latency
+        # Poll Pi for PCR-based stream latency + GoPro status
         asyncio.ensure_future(self._poll_pi_stream_latency())
+        asyncio.ensure_future(self._poll_gopro_status())
 
     async def _udp_recv_loop(self):
         while self._running:
@@ -234,6 +272,33 @@ class HostApp:
                 pass
             await asyncio.sleep(2)  # 0.5 Hz poll is plenty
 
+    async def _poll_gopro_status(self):
+        """Poll GoPro camera state through Pi proxy (0.5 Hz).
+
+        Emits gopro_status_updated with a dict containing:
+          - online: bool
+          - recording: bool
+          - battery_pct: int
+          - sd_remaining_bytes: int
+          - model_name: str
+          - busy: bool
+        """
+        while self._running:
+            try:
+                status = await self._gopro.get_status()
+                data = {
+                    "online": True,
+                    "recording": status.recording,
+                    "battery_pct": int(status.battery_pct),
+                    "sd_remaining_bytes": int(status.storage_gb_free * 1e9),
+                    "model_name": status.model_name,
+                    "busy": status.busy,
+                }
+                self._window.gopro_status_updated.emit(data)
+            except Exception:
+                self._window.gopro_status_updated.emit({"online": False})
+            await asyncio.sleep(2)
+
     def _process_frame(self):
         frame = self._video_source.read()
         if frame is None:
@@ -244,6 +309,10 @@ class HostApp:
                 self._window.video_preview.update_frame(frame, 0.0)
             # If stream is not stale, keep showing the last good frame (skip)
             return
+
+        if not self._first_frame_seen:
+            self._first_frame_seen = True
+            self._startup_check.on_frame_received()
 
         self._frame_count += 1
         t0 = time.monotonic()
@@ -403,16 +472,100 @@ class HostApp:
                 self._window.dashboard.update_winch(
                     float(p.get("position_mm", 0)), float(p.get("speed_mm_s", 0)),
                     bool(p.get("limit_top", False)), bool(p.get("limit_bottom", False)))
-            elif msg_type == "tel.gopro_status":
-                self._window.node_status.update_node("gopro", None, 0,
-                    f"REC={p.get('recording')} BATT={p.get('battery_pct')}% MODE={p.get('mode')}")
             elif msg_type == "tel.pi_status":
                 self._window.dashboard.update_value("pi_cpu_temp", float(p.get("cpu_temp_c", 0)))
                 self._window.dashboard.update_value("pi_cpu", float(p.get("cpu_pct", 0)))
                 self._window.dashboard.update_value("pi_mem", float(p.get("memory_pct", 0)))
+            elif msg_type == "sys.pong":
+                self._startup_check.on_pong()
+            elif msg_type == "sys.startup_status":
+                checks = p.get("checks", p) if isinstance(p, dict) else {}
+                self._startup_check.on_startup_status(checks)
             elif msg_type == "sys.heartbeat":
                 node_id = msg.node_id
                 self._registry.heartbeat(node_id)
+
+    def _on_gopro_command(self, action: str, setting: str, value: str):
+        """Handle GoPro control commands from UI via direct HTTP to Pi proxy."""
+        if action == "setting":
+            self._schedule_async(self._gopro_set_setting(setting, value))
+        elif action == "preset_group":
+            group_map = {"video": 0, "photo": 1, "timelapse": 2}
+            gid = group_map.get(value, 0)
+            self._schedule_async(self._gopro.load_preset_group(gid))
+        elif action == "get_settings":
+            self._schedule_async(self._fetch_gopro_settings())
+        elif action == "record":
+            if value == "1":
+                self._schedule_async(self._gopro.start_recording())
+            else:
+                self._schedule_async(self._gopro.stop_recording())
+
+    async def _gopro_set_setting(self, setting: str, value: str):
+        ok = await self._gopro.set_setting(setting, value)
+        self._window.gopro_setting_result.emit(setting, value, ok, None)
+
+    async def _fetch_gopro_settings(self):
+        data = await self._gopro.get_all_settings()
+        if data:
+            self._window.gopro_settings_loaded.emit(data)
+
+    def _on_gopro_probe(self, setting: str, probe_option: str):
+        """Probe available options for a setting without permanently changing it."""
+        self._schedule_async(self._gopro_probe_setting(setting, probe_option))
+
+    async def _gopro_probe_setting(self, setting: str, probe_option: str):
+        result = await self._gopro.probe_setting(setting)
+        self._window.gopro_probe_result.emit(
+            result["setting"], result["current_option"],
+            result["available"], result["probe_changed"])
+
+    def _on_get_presets(self):
+        """Request preset list from camera via HTTP."""
+        self._schedule_async(self._fetch_presets())
+
+    async def _fetch_presets(self):
+        data = await self._gopro.get_preset_status()
+        if data:
+            presets, active = GoProClient.normalize_presets(data)
+            self._window.gopro_presets_loaded.emit(presets, active)
+
+    def _on_load_preset(self, preset_id: int):
+        """Load a specific preset on the camera and restart video pipeline."""
+        logger.info("Loading preset: %d", preset_id)
+        self._restart_gen += 1
+        self._schedule_async(self._load_preset_and_restart(preset_id, self._restart_gen))
+
+    async def _load_preset_and_restart(self, preset_id: int, gen: int):
+        ok = await self._gopro.load_preset(preset_id)
+        if not ok:
+            return
+        # Abort if a newer preset was requested while loading
+        if gen != self._restart_gen:
+            return
+        data = await self._gopro.get_preset_status()
+        if data:
+            presets, _ = GoProClient.normalize_presets(data)
+            for p in presets:
+                if p.get("id") == preset_id:
+                    from deepsight_host.gopro.settings_decode import preset_aspect_ratio
+                    aspect = preset_aspect_ratio(p.get("setting_array", []))
+                    self._window.gopro_preset_switched.emit(preset_id, aspect)
+                    # Wait for camera hardware to finish mode switch
+                    await asyncio.sleep(2.0)
+                    if gen != self._restart_gen:
+                        return
+                    # Restart GoPro viewfinder stream (camera stops it on preset change)
+                    logger.info("Restarting GoPro viewfinder stream")
+                    await self._gopro.start_viewfinder()
+                    await asyncio.sleep(3.0)
+                    if gen != self._restart_gen:
+                        return
+                    # Restart Host video receiver to pick up new resolution
+                    if isinstance(self._video_source, StreamReceiver):
+                        logger.info("Restarting video pipeline for new resolution")
+                        await self._video_source.restart()
+                    break
 
     def _send_servo(self, servo_id: int, angle: float):
         self._schedule_async(self._udp.send(cmd_servo_set("host", servo_id, angle)))
@@ -439,6 +592,20 @@ class HostApp:
     def _on_node_state_change(self, node_id: str, old, new):
         logger.warning("Node %s: %s -> %s", node_id, old, new)
         self._window.set_status_message(f"Node {node_id}: {old} -> {new}")
+
+    def _on_check_result(self, name: str, status: str, detail: str):
+        """Update status bar with individual check result."""
+        summary = self._startup_check.summary()
+        self._window.set_status_message(summary)
+        logger.info("Startup check [%s]: %s — %s", name, status, detail)
+
+    def _on_check_all_done(self, ok: bool):
+        """Called when all startup checks complete."""
+        state = "OK" if ok else "DEGRADED"
+        summary = self._startup_check.summary()
+        self._window.set_status_message(f"Startup: {summary}")
+        if not ok:
+            logger.warning("Startup check FAILED — %s", summary)
 
 
 def _cv2():

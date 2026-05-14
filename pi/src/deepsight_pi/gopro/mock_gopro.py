@@ -101,7 +101,32 @@ class MockGoPro(GoProController):
         return True
 
     async def get_preset_status(self) -> dict:
-        return {"group": self._preset_group, "mode": self._mode}
+        return {
+            "group_id": 1000,
+            "active_preset_id": 0,
+            "presets": [
+                {"id": 0, "title_id": 0, "title": "Activity",
+                 "icon": 0, "mode": 12, "is_visible": True},
+                {"id": 1, "title_id": 1, "title": "Standard",
+                 "icon": 1, "mode": 12, "is_visible": True},
+                {"id": 2, "title_id": 2, "title": "Cinematic",
+                 "icon": 2, "mode": 12, "is_visible": True},
+                {"id": 3, "title_id": 3, "title": "Ultra Slo-Mo",
+                 "icon": 3, "mode": 12, "is_visible": True},
+                {"id": 4, "title_id": 4, "title": "Basic",
+                 "icon": 4, "mode": 12, "is_visible": True},
+                {"id": 5, "title_id": 5, "title": "5.3K 30",
+                 "icon": 5, "mode": 12, "is_visible": True},
+                {"id": 6, "title_id": 6, "title": "4K 60",
+                 "icon": 6, "mode": 12, "is_visible": True},
+                {"id": 7, "title_id": 7, "title": "1080p 120",
+                 "icon": 7, "mode": 12, "is_visible": True},
+                {"id": 8, "title_id": 8, "title": "HDR",
+                 "icon": 8, "mode": 12, "is_visible": True},
+                {"id": 9, "title_id": 9, "title": "Log",
+                 "icon": 9, "mode": 12, "is_visible": True},
+            ],
+        }
 
     # ── Settings ──────────────────────────────────────
 

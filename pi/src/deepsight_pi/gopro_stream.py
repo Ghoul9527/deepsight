@@ -21,7 +21,12 @@ UDP_PORT = 8554
 
 
 class GoProStreamManager:
-    """Receives GoPro's UDP MPEG-TS and feeds it to StreamRelay."""
+    """Receives GoPro's UDP MPEG-TS and forwards to Host via UDP.
+
+    Low-latency design: GoPro datagrams are forwarded directly to the Host
+    over UDP — no TCP relay, no ring buffer, no extra copies. The Host runs
+    ffmpeg reading udp:// directly, eliminating the TCP→pipe→ffmpeg hop.
+    """
 
     def __init__(self, gopro_ip: str = "172.25.132.51"):
         self._gopro_ip = gopro_ip
@@ -33,6 +38,9 @@ class GoProStreamManager:
         self._health_task: asyncio.Task | None = None
         self._running = False
         self._last_data_time: float = 0.0
+
+        # UDP forward target (Host IP, port) — direct low-latency path
+        self._forward_addr: tuple[str, int] | None = None
 
         # PCR-based latency estimation (GoPro encoder clock → Pi system clock)
         self._pcr_first_pi: float | None = None   # Pi monotonic at first valid PCR
@@ -113,6 +121,16 @@ class GoProStreamManager:
 
     def set_gopro_ip(self, ip: str) -> None:
         self._gopro_ip = ip
+
+    def set_forward_target(self, host: str, port: int) -> None:
+        """Set the Host UDP target for direct datagram forwarding.
+
+        When set, every GoPro UDP datagram received is forwarded directly
+        to this address. This is the low-latency path — no TCP relay,
+        no ring buffer, no extra copies.
+        """
+        self._forward_addr = (host, port)
+        logger.info("UDP forward target set: %s:%d", host, port)
 
     # ── GoPro HTTP control ────────────────────────────────────
 
@@ -255,6 +273,12 @@ class GoProStreamManager:
                 self._reader.feed_data(data)
                 manager._last_data_time = time.monotonic()
                 manager._sample_pcr(data)
+                # Forward directly to Host via UDP (low-latency path)
+                if manager._forward_addr is not None:
+                    try:
+                        transport.sendto(data, manager._forward_addr)
+                    except OSError:
+                        pass  # Host unreachable, drop silently
 
             def connection_lost(self, exc):
                 if exc:
@@ -280,9 +304,9 @@ class GoProStreamManager:
         self._pcr_latency_ms = 0.0
         await relay.start(self._reader)
 
-        # Background tasks
+        # Keep-alive: prevent GoPro stream timeout every 60s.
+        # Health monitoring is handled by the outer reconnection loop in main.py.
         self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
-        self._health_task = asyncio.create_task(self._health_monitor())
 
     async def _stop_internal(self) -> None:
         """Stop UDP receiver and GoPro stream."""

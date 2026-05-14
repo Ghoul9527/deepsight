@@ -1,45 +1,36 @@
-# DeepSight Host Configuration
-
 host:
   id: host
   udp_port: 5005
   ws_port: 5001
-
 network:
-  pi_address: "192.168.20.51"
+  pi_address: 192.168.20.51
   pi_udp_port: 5100
   pi_ws_port: 5101
-
 video:
-  stream_url: "tcp://192.168.20.51:8554"  # Pi video stream
-
+  stream_url: "udp://0.0.0.0:8554"
 mock:
   enabled: false
-  video_source: "test_pattern"  # "test_pattern" | "file" | "stream"
-  tracking_target: "synthetic"   # "synthetic" | "none"
+  video_source: none
+  tracking_target: none
   frame_width: 1920
   frame_height: 1080
   fps: 30
-
 tracking:
-  mode: "fast"  # "fast" | "precise"
-  model_path: ""  # empty = download from ultralytics
+  mode: fast
+  model_path: ''
   confidence_threshold: 0.5
   iou_threshold: 0.45
-
 control:
   pid_p: 0.8
   pid_i: 0.05
   pid_d: 0.2
-  max_servo_speed: 60.0  # deg/s
-  dead_zone: 0.02  # fraction of frame center
-
+  max_servo_speed: 60.0
+  dead_zone: 0.02
 safety:
   tracking_lost_hold_s: 0.5
   tracking_lost_neutral_s: 2.0
   servo_neutral_angle: 90.0
-
 logging:
-  level: "DEBUG"
-  dir: "logs/host/"
+  level: DEBUG
+  dir: logs/host/
   telemetry_record: false

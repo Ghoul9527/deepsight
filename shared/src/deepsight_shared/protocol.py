@@ -103,6 +103,57 @@ def cmd_gopro_mode(node_id: str, mode: str) -> Message:
     return new_message(node_id, "cmd.gopro.mode", {"mode": mode})
 
 
+def cmd_gopro_setting(node_id: str, setting: str, value) -> Message:
+    return new_message(node_id, "cmd.gopro.setting", {"setting": setting, "value": value})
+
+
+def cmd_gopro_preset(node_id: str, group: int, preset: int = -1) -> Message:
+    return new_message(node_id, "cmd.gopro.preset", {"group": group, "preset": preset})
+
+
+def cmd_gopro_get_settings(node_id: str) -> Message:
+    return new_message(node_id, "cmd.gopro.get_settings", {})
+
+
+def cmd_gopro_get_presets(node_id: str, group: int = 1000) -> Message:
+    """Request preset list for a group. 1000=video, 1001=photo, 1002=timelapse."""
+    return new_message(node_id, "cmd.gopro.get_presets", {"group": group})
+
+
+def cmd_gopro_load_preset(node_id: str, preset_id: int) -> Message:
+    """Load a specific preset by its numeric ID."""
+    return new_message(node_id, "cmd.gopro.load_preset", {"preset_id": preset_id})
+
+
+def cmd_gopro_probe(node_id: str, setting: str, probe_option: str) -> Message:
+    """Probe available options for a setting without changing the current value.
+
+    Pi sends GET /setting?setting=X&option=PROBE to trigger error-3,
+    then restores the original value if the probe option was accepted.
+    """
+    return new_message(node_id, "cmd.gopro.probe", {
+        "setting": setting, "probe_option": probe_option,
+    })
+
+
+def tel_gopro_probe_result(node_id: str, setting: str, current_option: str,
+                           available_options: list | None = None,
+                           probe_changed: bool = False) -> Message:
+    """Result of a context-sensitive setting probe.
+
+    *available_options* is a list of ``{id, name}`` dicts when error-3 fires,
+    or None when the probe option itself was valid (probe_changed=True).
+    """
+    payload = {
+        "setting": setting,
+        "current_option": current_option,
+        "probe_changed": probe_changed,
+    }
+    if available_options is not None:
+        payload["available"] = available_options
+    return new_message(node_id, "tel.gopro.probe_result", payload)
+
+
 # ---- Telemetry ----
 
 
@@ -151,6 +202,28 @@ def tel_gopro_status(node_id: str, recording: bool, battery_pct: float,
     })
 
 
+def tel_gopro_settings(node_id: str, settings: dict) -> Message:
+    return new_message(node_id, "tel.gopro_settings", settings)
+
+
+def tel_gopro_presets(node_id: str, presets: list[dict],
+                      active_preset_id: int = -1, group_id: int = 1000) -> Message:
+    """Preset list with current active preset marker."""
+    return new_message(node_id, "tel.gopro.presets", {
+        "group_id": group_id,
+        "active_preset_id": active_preset_id,
+        "presets": presets,
+    })
+
+
+def tel_gopro_setting_ack(node_id: str, setting: str, value: str,
+                          success: bool, available_options: list | None = None) -> Message:
+    payload = {"setting": setting, "value": value, "success": success}
+    if available_options is not None:
+        payload["available"] = available_options
+    return new_message(node_id, "tel.gopro_setting_ack", payload)
+
+
 def tel_pi_status(node_id: str, cpu_temp: float, cpu_pct: float,
                   mem_pct: float, uptime_s: float) -> Message:
     return new_message(node_id, "tel.pi_status", {
@@ -186,17 +259,40 @@ def sys_shutdown(node_id: str) -> Message:
     return new_message(node_id, "sys.shutdown", {})
 
 
+def sys_ping(node_id: str, seq: int = 0) -> Message:
+    """UDP connectivity check."""
+    return new_message(node_id, "sys.ping", {"seq": seq})
+
+
+def sys_pong(node_id: str, seq: int = 0) -> Message:
+    return new_message(node_id, "sys.pong", {"seq": seq})
+
+
+def sys_startup_status(node_id: str, checks: dict) -> Message:
+    """Pi startup self-check results. *checks* is a dict of check_name → {ok, detail}."""
+    return new_message(node_id, "sys.startup_status", {"checks": checks})
+
+
+def cmd_startup_check(node_id: str) -> Message:
+    """Request Pi to run its startup self-check and report back."""
+    return new_message(node_id, "cmd.sys.startup_check", {})
+
+
 # ---- Protocol validation ----
 
 
 KNOWN_TYPES = frozenset({
     "cmd.servo.set", "cmd.winch.set", "cmd.winch.stop",
     "cmd.lighting.set", "cmd.gopro.record", "cmd.gopro.mode",
+    "cmd.gopro.setting", "cmd.gopro.preset", "cmd.gopro.get_settings",
+    "cmd.gopro.get_presets", "cmd.gopro.load_preset", "cmd.gopro.probe",
     "tel.imu", "tel.depth", "tel.pressure", "tel.env", "tel.leak",
-    "tel.winch_state", "tel.gopro_status", "tel.pi_status",
+    "tel.winch_state", "tel.gopro_status", "tel.gopro_settings",
+    "tel.gopro_setting_ack", "tel.gopro.presets", "tel.gopro.probe_result", "tel.pi_status",
     "tel.tracking_result",
     "sys.heartbeat", "sys.ack", "sys.error", "sys.safety",
-    "sys.startup", "sys.shutdown",
+    "sys.startup", "sys.shutdown", "sys.ping", "sys.pong",
+    "sys.startup_status", "cmd.sys.startup_check",
 })
 
 

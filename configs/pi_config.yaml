@@ -6,13 +6,14 @@ pi:
   ws_port: 5101
 
 network:
-  host_address: "192.168.20.14"
+  host_address: "192.168.20.50"
   host_udp_port: 5005
   host_ws_port: 5001
+  host_video_port: 8554          # Host UDP listen port for video forwarding
 
 serial:
-  pico_port: "mock"             # Real: /dev/ttyAMA0, Mock: mock
-  stm32_port: "mock"            # Real: /dev/ttyAMA1, Mock: mock
+  pico_port: "/dev/ttyAMA0"     # Pico UART (set "mock" for simulated sensors)
+  stm32_port: "/dev/ttyAMA1"    # STM32 UART (set "mock" for simulated winch)
   pico_baud: 115200
   stm32_baud: 115200
 

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt, QEvent, QTimer
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtCore import Qt, QEvent, QTimer, Signal
+from PySide6.QtGui import QKeyEvent, QAction
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QApplication,
+    QMenuBar,
+    QMenu,
 )
 
 from deepsight_host.ui.styles import DARK_THEME
@@ -25,12 +27,26 @@ from deepsight_host.ui.node_status import NodeStatusWidget
 from deepsight_host.ui.control_panel import ControlPanelWidget
 from deepsight_host.ui.tracking_view import TrackingViewWidget
 from deepsight_host.ui.depth_chart import DepthChartWidget
+from deepsight_shared.constants import SafetyState
 from deepsight_host.ui.i18n import I18n, tr
 
 logger = logging.getLogger("host.ui")
 
 
 class MainWindow(QMainWindow):
+    gopro_command = Signal(str, str, str)  # action, setting, value
+    gopro_probe = Signal(str, str)  # setting_id, probe_option
+    gopro_get_presets = Signal()  # request preset list from camera
+    gopro_load_preset = Signal(int)  # load a specific preset by id
+
+    # GoPro HTTP results (emitted from async thread, handled on main thread)
+    gopro_presets_loaded = Signal(list, int)  # presets, active_id
+    gopro_settings_loaded = Signal(dict)  # all camera settings
+    gopro_setting_result = Signal(str, str, bool, object)  # setting, value, ok, available
+    gopro_probe_result = Signal(str, str, object, bool)  # setting, current, available, changed
+    gopro_status_updated = Signal(dict)  # raw camera state for node_status
+    gopro_preset_switched = Signal(int, object)  # preset_id, aspect_ratio (w,h) or None
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DeepSight — ROV Filming System")
@@ -40,9 +56,12 @@ class MainWindow(QMainWindow):
         self._i18n = I18n.instance()
         self._sizes_set = False
         self._setup_ui()
+        self._connect_gopro_signals()
         self._connect_i18n()
 
     def _setup_ui(self):
+        self._setup_menu_bar()
+
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
@@ -147,6 +166,136 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage(tr("app.ready"))
 
+    def _setup_menu_bar(self):
+        menu_bar = self.menuBar()
+
+        # ── Settings menu ──
+        self._settings_menu = menu_bar.addMenu(tr("menu.settings"))
+        settings_action = QAction(tr("menu.settings_action"), self)
+        settings_action.triggered.connect(self._open_settings)
+        self._settings_menu.addAction(settings_action)
+
+        self._settings_menu.addSeparator()
+
+        presets_action = QAction(tr("menu.gopro_presets"), self)
+        presets_action.triggered.connect(self._open_gopro_presets)
+        self._settings_menu.addAction(presets_action)
+        self._presets_action = presets_action
+
+        gopro_action = QAction(tr("menu.gopro_control"), self)
+        gopro_action.triggered.connect(self._open_gopro_control)
+        self._settings_menu.addAction(gopro_action)
+        gopro_action.setVisible(False)
+        self._gopro_action = gopro_action
+        self._settings_action = settings_action
+
+        # ── About menu ──
+        self._about_menu = menu_bar.addMenu(tr("menu.about"))
+
+    def _open_settings(self):
+        from deepsight_host.ui.settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self.config, self)
+        dlg.exec()
+
+    def _open_gopro_control(self):
+        from deepsight_host.ui.gopro_control_dialog import GoProControlDialog
+        if not hasattr(self, '_gopro_dlg') or self._gopro_dlg is None:
+            self._gopro_dlg = GoProControlDialog(self)
+            self._gopro_dlg.command.connect(self.gopro_command.emit)
+            self._gopro_dlg.probe_requested.connect(self.gopro_probe.emit)
+            self._gopro_dlg.finished.connect(self._on_gopro_dlg_closed)
+        self._gopro_dlg.show()
+        self._gopro_dlg.raise_()
+        self._gopro_dlg.activateWindow()
+
+    def _open_gopro_presets(self):
+        from deepsight_host.ui.gopro_presets_dialog import PresetsDialog
+        if not hasattr(self, '_presets_dlg') or self._presets_dlg is None:
+            self._presets_dlg = PresetsDialog(self)
+            self._presets_dlg.load_preset.connect(self.gopro_load_preset.emit)
+            self._presets_dlg.refresh_requested.connect(self.gopro_get_presets.emit)
+            self._presets_dlg.finished.connect(self._on_presets_dlg_closed)
+        self._presets_dlg.show()
+        self._presets_dlg.raise_()
+        self._presets_dlg.activateWindow()
+        # Fetch presets from camera on open
+        self.gopro_get_presets.emit()
+
+    def _on_gopro_dlg_closed(self):
+        self._gopro_dlg = None
+
+    def _on_presets_dlg_closed(self):
+        self._presets_dlg = None
+
+    @property
+    def gopro_dialog(self):
+        """Return the current GoPro control dialog if open, else None."""
+        return getattr(self, '_gopro_dlg', None)
+
+    @property
+    def presets_dialog(self):
+        """Return the current presets dialog if open, else None."""
+        return getattr(self, '_presets_dlg', None)
+
+    def set_presets_result(self, presets: list[dict], active_preset_id: int):
+        """Receive preset data and update the presets dialog."""
+        dlg = self.presets_dialog
+        if dlg is not None:
+            dlg.set_presets(presets, active_preset_id)
+
+    def set_gopro_status(self, data: dict):
+        """Update node status widget with GoPro state."""
+        if not data.get("online"):
+            self.node_status.update_node(
+                "gopro", SafetyState.DEGRADED, 0, tr("gopro.offline"))
+            return
+
+        bat = data.get("battery_pct", 0)
+        rec = "●" if data.get("recording") else "○"
+        sd_bytes = data.get("sd_remaining_bytes", 0)
+        sd_gb = sd_bytes / 1e9 if sd_bytes > 0 else 0
+
+        if sd_gb >= 1:
+            sd_str = f"{sd_gb:.0f}GB"
+        elif sd_gb > 0:
+            sd_str = f"{sd_gb * 1000:.0f}MB"
+        else:
+            sd_str = "--"
+
+        self.node_status.update_node("gopro", SafetyState.NOMINAL, 0,
+            f"REC {rec}  {bat}%  SD {sd_str}")
+
+    def _connect_gopro_signals(self):
+        self.gopro_presets_loaded.connect(self.set_presets_result)
+        self.gopro_settings_loaded.connect(self._on_gopro_settings)
+        self.gopro_setting_result.connect(self._on_gopro_setting_done)
+        self.gopro_probe_result.connect(self._on_gopro_probe_done)
+        self.gopro_status_updated.connect(self.set_gopro_status)
+        self.gopro_preset_switched.connect(self._on_preset_switched)
+
+    def _on_preset_switched(self, preset_id: int, aspect: tuple | None):
+        if aspect is not None:
+            self._video.set_target_aspect(aspect)
+
+    def _on_gopro_settings(self, data: dict):
+        dlg = self.gopro_dialog
+        if dlg is not None:
+            dlg.set_current_values(data)
+
+    def _on_gopro_setting_done(self, setting: str, value: str, ok: bool, available):
+        dlg = self.gopro_dialog
+        if dlg is not None:
+            dlg.set_setting_result(setting, value, ok, available)
+
+    def _on_gopro_probe_done(self, setting: str, current: str, available, changed: bool):
+        dlg = self.gopro_dialog
+        if dlg is not None:
+            dlg.set_probe_result(setting, current, available, changed)
+
+    def set_config(self, config):
+        """Store reference to HostConfig for settings dialog."""
+        self.config = config
+
     def showEvent(self, event):
         super().showEvent(event)
         if not self._sizes_set:
@@ -168,6 +317,11 @@ class MainWindow(QMainWindow):
         self._status_bar.showMessage(tr("app.ready"))
         self._safety_header_label.setText(tr("app.safety") + ":")
         self._safety_label.setText(tr(f"safety.{self._current_safety}"))
+        self._settings_menu.setTitle(tr("menu.settings"))
+        self._about_menu.setTitle(tr("menu.about"))
+        self._settings_action.setText(tr("menu.settings_action"))
+        self._presets_action.setText(tr("menu.gopro_presets"))
+        self._gopro_action.setText(tr("menu.gopro_control"))
 
     def changeEvent(self, event):
         if event.type() == QEvent.WindowStateChange:

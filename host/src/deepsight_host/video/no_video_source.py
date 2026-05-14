@@ -79,5 +79,11 @@ class NoVideoSource:
     def read(self) -> np.ndarray | None:
         return self._frame.copy()
 
+    def frame_age_ms(self) -> float:
+        return 0.0
+
+    def stale(self, threshold: float = 3.0) -> bool:
+        return False
+
     def close(self):
         pass
