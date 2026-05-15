@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Callable
 
 from deepsight_pi.bridge.host_link import HostLink
 from deepsight_pi.bridge.pico_link import PicoLink
@@ -20,12 +19,10 @@ logger = logging.getLogger("pi.bridge.router")
 
 class MessageRouter:
     def __init__(self, host_link: HostLink, pico_link: PicoLink,
-                 stm32_link: Stm32Link,
-                 gopro_ready: Callable[[], bool] | None = None):
+                 stm32_link: Stm32Link):
         self._host = host_link
         self._pico = pico_link
         self._stm32 = stm32_link
-        self._gopro_ready = gopro_ready
         self._running = False
 
     async def start(self):
@@ -111,17 +108,9 @@ class MessageRouter:
 
     async def startup_check(self) -> dict[str, dict]:
         """Run self-checks and report to Host."""
-        checks: dict[str, dict] = {}
-
-        # GoPro reachable via HTTP proxy
-        gopro_ok = self._gopro_ready() if self._gopro_ready else False
-        checks["gopro"] = {
-            "ok": gopro_ok,
-            "detail": "GoPro reachable" if gopro_ok else "GoPro not connected",
+        checks: dict[str, dict] = {
+            "host_link": {"ok": True, "detail": "UDP link active"},
         }
-
-        # Host link (router only runs when link is up)
-        checks["host_link"] = {"ok": True, "detail": "UDP link active"}
 
         msg = sys_startup_status("pi", checks)
         await self._host.send(msg)

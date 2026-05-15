@@ -24,6 +24,10 @@ class HostConfig:
         self.pi_udp_port: int = n.get("pi_udp_port", 5100)
         self.pi_ws_port: int = n.get("pi_ws_port", 5101)
 
+        go = data.get("gopro", {})
+        self.gopro_pi_url: str = go.get("pi_url", "http://192.168.20.51:8080")
+        self.gopro_real_host: str = go.get("real_host", "172.25.132.51")
+
         vi = data.get("video", {})
         self.stream_url: str = vi.get("stream_url", "")
 
@@ -40,6 +44,42 @@ class HostConfig:
         self.model_path: str = t.get("model_path", "")
         self.confidence_threshold: float = t.get("confidence_threshold", 0.5)
         self.iou_threshold: float = t.get("iou_threshold", 0.45)
+
+        ct = data.get("controller", {})
+        self.controller_poll_hz: int = ct.get("poll_hz", 50)
+        self.controller_dead_zone: float = ct.get("dead_zone", 0.08)
+        self.controller_smoothing_alpha: float = ct.get("smoothing_alpha", 0.4)
+        self.controller_mappings: dict = ct.get("mappings", {})
+        self.controller_max_winch_speed: float = ct.get("max_winch_speed", 100.0)
+        self.controller_max_servo_speed: float = ct.get("max_servo_speed", 60.0)
+        self.controller_light_brightness_speed: float = ct.get("light_brightness_speed", 5.0)
+        self.controller_sensitivity_step: float = ct.get("sensitivity_step", 0.1)
+        self.controller_sensitivity_min: float = ct.get("sensitivity_min", 0.2)
+        self.controller_sensitivity_max: float = ct.get("sensitivity_max", 2.0)
+        if not self.controller_mappings:
+            self.controller_mappings = {
+                "generic": {
+                    "name_patterns": [],
+                    "axes": {
+                        "winch": {"axis": 1, "invert": False},
+                        "rudder": {"axis": 0, "invert": False},
+                        "camera_pitch": {"axis": 3, "invert": True},
+                        "camera_yaw": {"axis": 2, "invert": False},
+                        "light": {"axis": 5},
+                        "descent_limit": {"axis": 4},
+                    },
+                    "buttons": {
+                        "drop_3m": 4, "body_reset": 8, "camera_center": 9,
+                        "full_reset": 10, "auto_track": 5, "record": 1,
+                        "hud": 2, "roll_reset": 3, "preset": 0,
+                        "e_stop": 6, "lock": 7,
+                    },
+                    "dpad": {
+                        "winch_sens_up": [0, 1], "winch_sens_down": [0, -1],
+                        "rudder_sens_left": [-1, 0], "rudder_sens_right": [1, 0],
+                    },
+                }
+            }
 
         c = data.get("control", {})
         self.pid_p: float = c.get("pid_p", 0.8)

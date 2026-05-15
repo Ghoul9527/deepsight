@@ -22,8 +22,6 @@ MOCK_YAML = {
     "pi": {"id": "pi-test", "udp_port": 5100, "ws_port": 5101},
     "network": {"host_address": "127.0.0.1", "host_udp_port": 5000, "host_ws_port": 5001},
     "serial": {"pico_port": "mock", "stm32_port": "mock", "pico_baud": 115200, "stm32_baud": 115200},
-    "gopro": {"mock": True},
-    "capture": {"mock": True, "device": "/dev/video0", "width": 1920, "height": 1080, "fps": 60},
     "watchdog": {"heartbeat_interval_s": 0.5, "reconnect_delay_s": 2.0},
     "logging": {"level": "DEBUG", "dir": "logs/pi-test/"},
 }
@@ -134,10 +132,7 @@ class TestMessageRouter:
         from deepsight_pi.bridge.message_router import MessageRouter
 
         cfg = make_cfg()
-        return MessageRouter(
-            HostLink(cfg), PicoLink(cfg), Stm32Link(cfg),
-            gopro_ready=lambda: True,
-        )
+        return MessageRouter(HostLink(cfg), PicoLink(cfg), Stm32Link(cfg))
 
     def test_router_init(self):
         router = self._make_router()

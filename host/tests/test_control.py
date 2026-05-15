@@ -532,24 +532,61 @@ class TestGameControllerSignals:
 
     def test_signal_definitions_exist(self):
         from deepsight_host.control.controller import GameController
-        assert hasattr(GameController, 'pan_changed')
-        assert hasattr(GameController, 'tilt_changed')
         assert hasattr(GameController, 'winch_speed_changed')
+        assert hasattr(GameController, 'plate_yaw_changed')
+        assert hasattr(GameController, 'gimbal_pitch_changed')
+        assert hasattr(GameController, 'gimbal_yaw_changed')
+        assert hasattr(GameController, 'light_brightness')
+        assert hasattr(GameController, 'descent_speed_limit')
         assert hasattr(GameController, 'e_stop')
-        assert hasattr(GameController, 'tracking_toggle')
+        assert hasattr(GameController, 'lock_state_changed')
 
-    def test_controller_connects_to_signals(self):
+    def test_all_digital_signals_exist(self):
         from deepsight_host.control.controller import GameController
-        from PySide6.QtCore import QObject, Signal
-        # Create a dummy parent -- no QApplication needed for signal/slot meta-object
+        for attr in ('drop_to_3m', 'body_recenter', 'gimbal_recenter', 'all_recenter',
+                      'tracking_toggle', 'record_toggle', 'hud_toggle',
+                      'roll_recenter', 'preset_cycle'):
+            assert hasattr(GameController, attr), f"Missing signal: {attr}"
+
+    def test_sensitivity_signals_exist(self):
+        from deepsight_host.control.controller import GameController
+        assert hasattr(GameController, 'winch_sensitivity_changed')
+        assert hasattr(GameController, 'plate_sensitivity_changed')
+
+    def test_lock_state_enum(self):
+        from deepsight_host.control.controller import LockState
+        assert LockState.LOCKED.value == "locked"
+        assert LockState.UNLOCKED.value == "unlocked"
+
+    def test_sensitivity_curve(self):
+        from deepsight_host.control.controller import GameController
+        # Level 5 = linear (1.0)
+        assert GameController.sensitivity_curve(5) == pytest.approx(1.0)
+        # Level 1 = minimum
+        assert GameController.sensitivity_curve(1) == pytest.approx(0.36)
+        # Level 10 = maximum
+        assert GameController.sensitivity_curve(10) == pytest.approx(1.8)
+        # Clamped to 1-10
+        assert GameController.sensitivity_curve(0) == pytest.approx(GameController.sensitivity_curve(1))
+        assert GameController.sensitivity_curve(11) == pytest.approx(GameController.sensitivity_curve(10))
+
+    def test_controller_starts_locked(self):
+        from deepsight_host.control.controller import GameController, LockState
+        from PySide6.QtCore import QObject
         parent = QObject()
         gc = GameController(parent=parent)
         assert gc.connected is False
-        assert isinstance(gc.pan_changed, Signal)
-        assert isinstance(gc.tilt_changed, Signal)
-        assert isinstance(gc.winch_speed_changed, Signal)
-        assert isinstance(gc.e_stop, Signal)
-        assert isinstance(gc.tracking_toggle, Signal)
+        assert gc.locked is True
+        assert gc.lock_state == LockState.LOCKED
+
+    def test_set_plate_sign(self):
+        from deepsight_host.control.controller import GameController
+        from PySide6.QtCore import QObject
+        parent = QObject()
+        gc = GameController(parent=parent)
+        gc.set_plate_sign(1.0)
+        gc.set_plate_sign(-1.0)
+        gc.set_plate_sign(0.0)
 
     def test_discover_controller_returns_none_without_pygame(self):
         from deepsight_host.control.controller import discover_controller

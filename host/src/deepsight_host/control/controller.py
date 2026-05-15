@@ -1,58 +1,231 @@
-"""Game controller / joystick input for manual servo and winch control.
+"""Gamepad input service for Logitech F310 and compatible controllers.
 
-Supports any USB gamepad recognised by pygame (Xbox, PlayStation, etc.).
-Maps axes and buttons to the control panel signals.
+All gamepad input flows through this layer. Business logic never touches pygame
+or raw button indices directly — everything is mapped through config.
+
+Architecture:
+  GameController (this file)  →  signals  →  Host app / control pipeline
+  Config-driven mapping; no F310 specifics hardcoded in business logic.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from enum import Enum
+from typing import Any
 
 from PySide6.QtCore import QTimer, Signal, QObject
 
 logger = logging.getLogger("host.control.controller")
 
 
-class GameController(QObject):
-    """Reads a USB game controller and emits control signals.
+class LockState(Enum):
+    LOCKED = "locked"
+    UNLOCKED = "unlocked"
 
-    Standard mapping (Xbox / PlayStation layout):
-      Left stick X  → pan servo angle
-      Left stick Y  → tilt servo angle
-      Right stick Y → winch speed/position
-      B / Circle    → emergency stop
-      Start         → toggle tracking mode
+
+# ── Fallback mapping (DirectInput / F310 layout) ──
+_FALLBACK_MAPPING: dict[str, Any] = {
+    "name_patterns": [],
+    "axes": {
+        "winch": {"axis": 1, "invert": False},
+        "plate_yaw": {"axis": 0, "invert": False},
+        "gimbal_pitch": {"axis": 3, "invert": True},
+        "gimbal_yaw": {"axis": 2, "invert": False},
+        "light": {"axis": 5},
+        "descent_limit": {"axis": 4},
+    },
+    "buttons": {
+        "drop_to_3m": 4, "body_recenter": 8, "gimbal_recenter": 9,
+        "all_recenter": 10, "tracking": 5, "record": 1,
+        "hud": 2, "roll_recenter": 3, "preset": 0,
+        "e_stop": 6, "lock": 7,
+    },
+    "dpad": {
+        "winch_sens_up": [0, 1], "winch_sens_down": [0, -1],
+        "plate_sens_left": [-1, 0], "plate_sens_right": [1, 0],
+    },
+}
+
+
+def _match_mapping(name: str, mappings: dict) -> dict[str, Any]:
+    """Return the mapping whose name_patterns matches the controller name, or generic/fallback."""
+    name_lower = name.lower()
+    for key, m in mappings.items():
+        patterns = m.get("name_patterns", [])
+        for pat in patterns:
+            if pat.lower() in name_lower:
+                logger.info("Controller mapping: %s (matched '%s')", key, pat)
+                return m
+    if "generic" in mappings:
+        return mappings["generic"]
+    return _FALLBACK_MAPPING
+
+
+def _get_axis_cfg(mapping: dict, name: str) -> dict:
+    return mapping.get("axes", {}).get(name, {})
+
+
+def _get_button_idx(mapping: dict, name: str) -> int | None:
+    return mapping.get("buttons", {}).get(name)
+
+
+class GameController(QObject):
+    """Reads a USB gamepad and emits typed control signals.
+
+    Mapping is selected automatically from the controller name via config patterns.
+    Falls back to DirectInput/F310 layout when no pattern matches.
+
+    Lock / safety:
+      - System starts LOCKED; all stick inputs are ignored until Start is pressed.
+      - Back (E-stop) is always active regardless of lock state.
+      - All auto-actions are cancelled on E-stop or re-lock.
     """
 
-    pan_changed = Signal(float)
-    tilt_changed = Signal(float)
-    winch_speed_changed = Signal(float)
-    e_stop = Signal()
-    tracking_toggle = Signal()
+    # ── Analog axes ──
+    winch_speed_changed = Signal(float)       # -1..1, positive = reel in (ascend)
+    plate_yaw_changed = Signal(float)          # -1..1
+    gimbal_pitch_changed = Signal(float)       # angle degrees
+    gimbal_yaw_changed = Signal(float)         # angle degrees
+    light_brightness = Signal(float)           # -1=auto, 0..1=manual
+    descent_speed_limit = Signal(float)        # 0..1, 1=full speed when released
 
-    _PAN_CENTER = 90.0
-    _PAN_RANGE = 60.0    # ±60° from center
-    _TILT_CENTER = 90.0
-    _TILT_RANGE = 60.0
-    _DEAD_ZONE = 0.08
+    # ── Digital actions (edge-triggered, not held) ──
+    e_stop = Signal()                          # Back — highest priority
+    lock_state_changed = Signal(LockState)     # Start — LockState.UNLOCKED or LOCKED
+    drop_to_3m = Signal()                      # LB
+    body_recenter = Signal()                   # L3
+    gimbal_recenter = Signal()                 # R3
+    all_recenter = Signal()                    # Logo
+    tracking_toggle = Signal()                 # RB
+    record_toggle = Signal()                   # B
+    hud_toggle = Signal()                      # X
+    roll_recenter = Signal()                   # Y
+    preset_cycle = Signal(int)                 # A: +1 short press, -1 long press
 
-    def __init__(self, poll_hz: int = 50, parent=None):
+    # ── Sensitivity adjustment (D-pad steps, integer levels) ──
+    winch_sensitivity_changed = Signal(int)    # ±1 step
+    plate_sensitivity_changed = Signal(int)    # ±1 step
+
+    # ── Sensitivity level limits ──
+    SENSITIVITY_MIN = 1
+    SENSITIVITY_MAX = 10
+
+    def __init__(
+        self,
+        poll_hz: int = 50,
+        dead_zone: float = 0.08,
+        smoothing_alpha: float = 0.4,
+        max_winch_speed: float = 100.0,
+        max_servo_speed: float = 60.0,
+        sensitivity_step: float = 0.1,
+        sensitivity_min: float = 0.2,
+        sensitivity_max: float = 2.0,
+        mappings: dict | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self._joystick = None
         self._connected = False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll)
         self._poll_hz = poll_hz
-        self._e_stop_pressed = False
-        self._start_pressed = False
+        self._dead_zone = dead_zone
+        self._smoothing_alpha = smoothing_alpha
+        self._max_winch_speed = max_winch_speed
+        self._max_servo_speed = max_servo_speed
+        self._sensitivity_step = sensitivity_step
+        self._sensitivity_min = sensitivity_min
+        self._sensitivity_max = sensitivity_max
+        self._mappings = mappings or {}
+        self._mapping: dict[str, Any] = _FALLBACK_MAPPING
+
+        # Lock state — system starts LOCKED
+        self._locked = True
+
+        # Winch direction: +1 ascending, -1 descending, 0 neutral
+        self._winch_direction = 0.0
+
+        # Plate direction sign: +1 or -1, set externally from winch direction
+        self._plate_sign = 1.0
+
+        # Smoothed axis values
+        self._smooth_winch = 0.0
+        self._smooth_plate = 0.0
+        self._smooth_gimbal_pitch = 0.0
+        self._smooth_gimbal_yaw = 0.0
+
+        # Edge detection state for all digital buttons
+        self._btn_prev: dict[str, bool] = {
+            "drop_to_3m": False, "body_recenter": False, "gimbal_recenter": False,
+            "all_recenter": False, "tracking": False, "record": False,
+            "hud": False, "roll_recenter": False, "preset": False,
+            "e_stop": False, "lock": False,
+        }
+
+        # A button short/long press tracking
+        self._preset_press_time: float | None = None
+        self._preset_long_fired = False
+        self._PRESET_LONG_THRESHOLD = 0.5  # seconds
+
+        # D-pad state and debounce
+        self._dpad_state: dict[str, bool] = {
+            "winch_sens_up": False, "winch_sens_down": False,
+            "plate_sens_left": False, "plate_sens_right": False,
+        }
+        self._dpad_last_fire: dict[str, float] = {
+            "winch_sens_up": 0.0, "winch_sens_down": 0.0,
+            "plate_sens_left": 0.0, "plate_sens_right": 0.0,
+        }
+        self._DPAD_DEBOUNCE = 0.2  # seconds
+
+        # Light: manual vs auto mode
+        self._light_manual = False
+
+        # Sensitivity levels (1-10)
+        self._winch_sens_level = 5
+        self._plate_sens_level = 5
+
+    # ── Public properties ──
 
     @property
     def connected(self) -> bool:
         return self._connected
 
+    @property
+    def locked(self) -> bool:
+        return self._locked
+
+    @property
+    def lock_state(self) -> LockState:
+        return LockState.LOCKED if self._locked else LockState.UNLOCKED
+
+    @property
+    def winch_direction(self) -> float:
+        """Current winch direction: +1 ascending, -1 descending, 0 neutral."""
+        return self._winch_direction
+
+    def set_plate_sign(self, sign: float):
+        """Set the sign multiplier for plate yaw (±1) based on winch direction.
+
+        Called externally by app.py when winch direction changes.
+        plate_yaw = joystick_value × sign
+        """
+        self._plate_sign = 1.0 if sign >= 0 else -1.0
+
+    @staticmethod
+    def sensitivity_curve(level: int) -> float:
+        """Convert sensitivity level (1-10) to multiplier.
+
+        Level 5 = 1.0 (linear). Curve: 0.2 + (level/5.0) * 0.8
+        """
+        level = max(1, min(10, level))
+        return 0.2 + (level / 5.0) * 0.8
+
+    # ── Lifecycle ──
+
     def start(self) -> bool:
-        """Initialise pygame joystick subsystem. Returns True on success."""
         try:
             import pygame
             pygame.init()
@@ -68,11 +241,19 @@ class GameController(QObject):
 
         self._joystick = pygame.joystick.Joystick(0)
         self._joystick.init()
+
+        name = self._joystick.get_name()
+        self._mapping = _match_mapping(name, self._mappings)
+
         self._connected = True
-        logger.info("Game controller connected: %s (axes=%d, buttons=%d)",
-                     self._joystick.get_name(),
-                     self._joystick.get_numaxes(),
-                     self._joystick.get_numbuttons())
+        self._locked = True
+        logger.info(
+            "Game controller connected: %s (axes=%d, buttons=%d, hats=%d) — LOCKED",
+            name,
+            self._joystick.get_numaxes(),
+            self._joystick.get_numbuttons(),
+            self._joystick.get_numhats(),
+        )
 
         self._timer.start(1000 // self._poll_hz)
         return True
@@ -83,10 +264,12 @@ class GameController(QObject):
             self._joystick.quit()
             self._joystick = None
         self._connected = False
+        self._locked = True
         logger.info("Game controller: disconnected")
 
+    # ── Main poll loop ──
+
     def _poll(self):
-        """Poll joystick axes and buttons."""
         if not self._connected or self._joystick is None:
             return
 
@@ -96,54 +279,271 @@ class GameController(QObject):
         except Exception:
             return
 
-        # ── Axes ──
+        self._poll_axes()
+        self._poll_buttons()
+        self._poll_dpad()
+
+    # ── Axes ──
+
+    def _poll_axes(self):
+        m = self._mapping
+        num_axes = self._joystick.get_numaxes()
+        dt = 1.0 / max(self._poll_hz, 1)
+
+        def read_axis(cfg_name: str, default: int = -1) -> float:
+            cfg = _get_axis_cfg(m, cfg_name)
+            idx = cfg.get("axis", default)
+            if idx < 0 or idx >= num_axes:
+                return 0.0
+            try:
+                raw = self._joystick.get_axis(idx)
+            except Exception:
+                return 0.0
+            if abs(raw) < self._dead_zone:
+                return 0.0
+            sign = 1.0 if raw > 0 else -1.0
+            normalized = sign * (abs(raw) - self._dead_zone) / (1.0 - self._dead_zone)
+            if cfg.get("invert", False):
+                normalized = -normalized
+            return float(normalized)
+
+        # ── Winch (left stick Y) ──
+        raw_winch = read_axis("winch", 1)
+        if self._locked:
+            raw_winch = 0.0
+        self._smooth_winch += (raw_winch - self._smooth_winch) * self._smoothing_alpha
+        winch_val = self._smooth_winch * self._max_winch_speed
+        self.winch_speed_changed.emit(winch_val)
+
+        # Track winch direction for external consumers
+        if abs(self._smooth_winch) > 0.01:
+            self._winch_direction = 1.0 if self._smooth_winch > 0 else -1.0
+
+        # ── Plate yaw (left stick X) with external sign ──
+        raw_plate = read_axis("plate_yaw", 0)
+        if self._locked:
+            raw_plate = 0.0
+        self._smooth_plate += (raw_plate - self._smooth_plate) * self._smoothing_alpha
+        plate_val = self._smooth_plate * self._plate_sign
+        self.plate_yaw_changed.emit(plate_val)
+
+        # ── Gimbal pitch (right stick Y) ──
+        raw_gp = read_axis("gimbal_pitch", 3)
+        if self._locked:
+            raw_gp = 0.0
+        self._smooth_gimbal_pitch += (raw_gp - self._smooth_gimbal_pitch) * self._smoothing_alpha
+        gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._max_servo_speed * dt
+        self.gimbal_pitch_changed.emit(max(0.0, min(180.0, gimbal_pitch_angle)))
+
+        # ── Gimbal yaw (right stick X) ──
+        raw_gy = read_axis("gimbal_yaw", 2)
+        if self._locked:
+            raw_gy = 0.0
+        self._smooth_gimbal_yaw += (raw_gy - self._smooth_gimbal_yaw) * self._smoothing_alpha
+        gimbal_yaw_angle = 90.0 + self._smooth_gimbal_yaw * self._max_servo_speed * dt
+        self.gimbal_yaw_changed.emit(max(0.0, min(180.0, gimbal_yaw_angle)))
+
+        # ── Light brightness (RT) ──
+        # -1 (released) → auto mode (-1.0); pressed → 0..1 brightness
+        light_cfg = _get_axis_cfg(m, "light")
+        light_axis = light_cfg.get("axis", 5)
+        if light_axis >= 0 and light_axis < num_axes:
+            try:
+                raw_light = self._joystick.get_axis(light_axis)
+            except Exception:
+                raw_light = -1.0
+            # raw_light: -1 (released) to +1 (fully pressed)
+            brightness = (raw_light + 1.0) / 2.0  # 0..1
+            if brightness > 0.05:
+                self._light_manual = True
+                self.light_brightness.emit(brightness)
+            elif self._light_manual:
+                self._light_manual = False
+                self.light_brightness.emit(-1.0)  # auto mode
+
+        # ── Descent speed limit (LT) ──
+        # -1 (released) → 1.0 (full speed); +1 (pulled) → 0.0 (slowest)
+        desc_cfg = _get_axis_cfg(m, "descent_limit")
+        desc_axis = desc_cfg.get("axis", 4)
+        if desc_axis >= 0 and desc_axis < num_axes:
+            try:
+                raw_desc = self._joystick.get_axis(desc_axis)
+            except Exception:
+                raw_desc = -1.0
+            limit = 1.0 - (raw_desc + 1.0) / 2.0  # 1.0 released, 0.0 full pull
+            self.descent_speed_limit.emit(limit)
+
+    # ── Buttons (edge-triggered) ──
+
+    def _poll_buttons(self):
+        m = self._mapping
+        num_buttons = self._joystick.get_numbuttons()
+        now = time.monotonic()
+
+        def read_button(name: str) -> bool:
+            idx = _get_button_idx(m, name)
+            if idx is None or idx >= num_buttons:
+                return False
+            try:
+                return bool(self._joystick.get_button(idx))
+            except Exception:
+                return False
+
+        def edge(name: str) -> int:
+            """Return 1 on rising edge, -1 on falling edge, 0 otherwise."""
+            cur = read_button(name)
+            prev = self._btn_prev.get(name, False)
+            self._btn_prev[name] = cur
+            if cur and not prev:
+                return 1
+            elif not cur and prev:
+                return -1
+            return 0
+
+        # ── E-stop (Back) — ALWAYS active, regardless of lock state ──
+        if edge("e_stop") == 1:
+            logger.warning("Game controller: E-STOP triggered (Back)")
+            self.e_stop.emit()
+
+        # ── Lock/Unlock (Start) ──
+        if edge("lock") == 1:
+            self._locked = not self._locked
+            state = LockState.UNLOCKED if not self._locked else LockState.LOCKED
+            self.lock_state_changed.emit(state)
+            logger.info("Game controller: %s", state.value.upper())
+            if self._locked:
+                self._smooth_winch = 0.0
+                self._smooth_plate = 0.0
+                self._smooth_gimbal_pitch = 0.0
+                self._smooth_gimbal_yaw = 0.0
+                self.winch_speed_changed.emit(0.0)
+                self.plate_yaw_changed.emit(0.0)
+
+        # ── Below this point, locked state suppresses all non-safety buttons ──
+        if self._locked:
+            for name in self._btn_prev:
+                if name not in ("e_stop", "lock"):
+                    read_button(name)
+                    self._btn_prev[name] = read_button(name)
+            return
+
+        # ── A: Preset cycle (short press +1, long press -1) ──
+        preset_pressed = read_button("preset")
+        if preset_pressed and not self._btn_prev.get("preset", False):
+            # Rising edge — start timing
+            self._preset_press_time = now
+            self._preset_long_fired = False
+        elif preset_pressed and self._preset_press_time is not None:
+            # Held — check for long press threshold
+            if not self._preset_long_fired and (now - self._preset_press_time) >= self._PRESET_LONG_THRESHOLD:
+                self._preset_long_fired = True
+                self.preset_cycle.emit(-1)
+                logger.info("Game controller: Preset cycle BACKWARD (long press)")
+        elif not preset_pressed and self._btn_prev.get("preset", False):
+            # Falling edge — short press if long didn't fire
+            if self._preset_press_time is not None and not self._preset_long_fired:
+                elapsed = now - self._preset_press_time
+                if elapsed < self._PRESET_LONG_THRESHOLD:
+                    self.preset_cycle.emit(1)
+                    logger.info("Game controller: Preset cycle FORWARD (short press)")
+            self._preset_press_time = None
+            self._preset_long_fired = False
+        self._btn_prev["preset"] = preset_pressed
+
+        # ── LB: Drop to 3m ──
+        if edge("drop_to_3m") == 1:
+            self.drop_to_3m.emit()
+            logger.info("Game controller: Drop to 3m")
+
+        # ── L3: Body recenter ──
+        if edge("body_recenter") == 1:
+            self.body_recenter.emit()
+            logger.info("Game controller: Body recenter")
+
+        # ── R3: Gimbal recenter ──
+        if edge("gimbal_recenter") == 1:
+            self.gimbal_recenter.emit()
+            logger.info("Game controller: Gimbal recenter")
+
+        # ── Logo: All recenter ──
+        if edge("all_recenter") == 1:
+            self.all_recenter.emit()
+            logger.info("Game controller: All recenter")
+
+        # ── RB: Tracking toggle ──
+        if edge("tracking") == 1:
+            self.tracking_toggle.emit()
+            logger.info("Game controller: Tracking toggle")
+
+        # ── B: Record toggle ──
+        if edge("record") == 1:
+            self.record_toggle.emit()
+            logger.info("Game controller: Record toggle")
+
+        # ── X: HUD toggle ──
+        if edge("hud") == 1:
+            self.hud_toggle.emit()
+            logger.info("Game controller: HUD toggle")
+
+        # ── Y: Roll recenter ──
+        if edge("roll_recenter") == 1:
+            self.roll_recenter.emit()
+            logger.info("Game controller: Roll recenter")
+
+    # ── D-pad (hat) for sensitivity ──
+
+    def _poll_dpad(self):
+        m = self._mapping
         try:
-            lx = self._joystick.get_axis(0)  # left X
-            ly = self._joystick.get_axis(1)  # left Y
-            rx = self._joystick.get_axis(2)  # right X
-            ry = self._joystick.get_axis(3)  # right Y
+            num_hats = self._joystick.get_numhats()
+        except Exception:
+            return
+        if num_hats == 0:
+            return
+
+        try:
+            hat = self._joystick.get_hat(0)
         except Exception:
             return
 
-        # Pan from left stick X
-        if abs(lx) > self._DEAD_ZONE:
-            pan = self._PAN_CENTER + lx * self._PAN_RANGE
-            self.pan_changed.emit(float(pan))
-
-        # Tilt from left stick Y (inverted: up = negative Y)
-        if abs(ly) > self._DEAD_ZONE:
-            tilt = self._TILT_CENTER + (-ly) * self._TILT_RANGE
-            self.tilt_changed.emit(float(tilt))
-
-        # Winch speed from right stick Y
-        if abs(ry) > self._DEAD_ZONE:
-            self.winch_speed_changed.emit(float(-ry))
-
-        # ── Buttons ──
-        try:
-            buttons = self._joystick.get_numbuttons()
-        except Exception:
+        if self._locked:
+            for key in self._dpad_state:
+                self._dpad_state[key] = False
             return
 
-        if buttons > 1:
-            # B button (index 1 on both Xbox and PS) → E-stop
-            b_pressed = self._joystick.get_button(1)
-            if b_pressed and not self._e_stop_pressed:
-                self._e_stop_pressed = True
-                self.e_stop.emit()
-                logger.warning("Game controller: E-STOP triggered")
-            elif not b_pressed:
-                self._e_stop_pressed = False
+        now = time.monotonic()
 
-        if buttons > 7:
-            # Start button → toggle tracking mode
-            start = self._joystick.get_button(7)
-            if start and not self._start_pressed:
-                self._start_pressed = True
-                self.tracking_toggle.emit()
-                logger.info("Game controller: tracking toggle")
-            elif not start:
-                self._start_pressed = False
+        def dpad_edge(name: str, target: tuple) -> int:
+            cur = (hat[0] == target[0] and hat[1] == target[1])
+            prev = self._dpad_state.get(name, False)
+            self._dpad_state[name] = cur
+            if cur and not prev:
+                return 1
+            return 0
+
+        def debounced(name: str) -> bool:
+            last = self._dpad_last_fire.get(name, 0.0)
+            if now - last < self._DPAD_DEBOUNCE:
+                return False
+            self._dpad_last_fire[name] = now
+            return True
+
+        if dpad_edge("winch_sens_up", m.get("dpad", {}).get("winch_sens_up", [0, 1])) and debounced("winch_sens_up"):
+            self._winch_sens_level = min(self.SENSITIVITY_MAX, self._winch_sens_level + 1)
+            self.winch_sensitivity_changed.emit(self._winch_sens_level)
+            logger.info("Winch sensitivity: %d", self._winch_sens_level)
+        if dpad_edge("winch_sens_down", m.get("dpad", {}).get("winch_sens_down", [0, -1])) and debounced("winch_sens_down"):
+            self._winch_sens_level = max(self.SENSITIVITY_MIN, self._winch_sens_level - 1)
+            self.winch_sensitivity_changed.emit(self._winch_sens_level)
+            logger.info("Winch sensitivity: %d", self._winch_sens_level)
+        if dpad_edge("plate_sens_left", m.get("dpad", {}).get("plate_sens_left", [-1, 0])) and debounced("plate_sens_left"):
+            self._plate_sens_level = max(self.SENSITIVITY_MIN, self._plate_sens_level - 1)
+            self.plate_sensitivity_changed.emit(self._plate_sens_level)
+            logger.info("Plate sensitivity: %d", self._plate_sens_level)
+        if dpad_edge("plate_sens_right", m.get("dpad", {}).get("plate_sens_right", [1, 0])) and debounced("plate_sens_right"):
+            self._plate_sens_level = min(self.SENSITIVITY_MAX, self._plate_sens_level + 1)
+            self.plate_sensitivity_changed.emit(self._plate_sens_level)
+            logger.info("Plate sensitivity: %d", self._plate_sens_level)
 
 
 def discover_controller() -> str | None:

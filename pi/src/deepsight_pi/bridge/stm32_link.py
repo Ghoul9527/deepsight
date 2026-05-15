@@ -6,6 +6,11 @@ import asyncio
 import json
 import logging
 
+try:
+    from serial_asyncio import open_serial_connection
+except ImportError:
+    from asyncio import open_serial_connection  # Python 3.12+
+
 from deepsight_pi.config import PiConfig
 from deepsight_shared.protocol import Message
 
@@ -36,7 +41,7 @@ class Stm32Link:
 
         logger.info("Stm32Link: opening %s @ %d baud", self._port, self._baud)
         try:
-            self._reader, self._writer = await asyncio.open_serial_connection(
+            self._reader, self._writer = await open_serial_connection(
                 url=self._port, baudrate=self._baud,
             )
             self._recv_task = asyncio.create_task(self._recv_loop())

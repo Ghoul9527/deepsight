@@ -25,7 +25,7 @@ from deepsight_host.video.stream_receiver import StreamReceiver
 from deepsight_host.control.framer import Framer
 from deepsight_host.control.servo_mapper import ServoMapper
 from deepsight_host.control.pid import PIDController
-from deepsight_host.control.controller import GameController
+from deepsight_host.control.controller import GameController, LockState
 from deepsight_host.logging.structured_logger import setup_logging
 from deepsight_host.logging.telemetry_recorder import TelemetryRecorder
 from deepsight_host.diagnostics.startup_check import StartupCheck
@@ -101,11 +101,22 @@ class HostApp:
         )
 
         # Game controller input
-        self._controller = GameController()
+        self._controller = GameController(
+            poll_hz=self.config.controller_poll_hz,
+            dead_zone=self.config.controller_dead_zone,
+            smoothing_alpha=self.config.controller_smoothing_alpha,
+            max_winch_speed=self.config.controller_max_winch_speed,
+            max_servo_speed=self.config.controller_max_servo_speed,
+            light_brightness_speed=self.config.controller_light_brightness_speed,
+            sensitivity_step=self.config.controller_sensitivity_step,
+            sensitivity_min=self.config.controller_sensitivity_min,
+            sensitivity_max=self.config.controller_sensitivity_max,
+            mappings=self.config.controller_mappings,
+        )
 
-        # GoPro HTTP client (talks to Pi reverse proxy)
+        # GoPro HTTP client (via Pi TCP forward, Host header = GoPro real IP)
         self._gopro = GoProClient(
-            f"http://{self.config.pi_address}:8080")
+            self.config.gopro_pi_url, self.config.gopro_real_host)
 
         # Session recording
         self._recorder = TelemetryRecorder()
@@ -155,16 +166,36 @@ class HostApp:
 
         self._registry.on_state_change(self._on_node_state_change)
 
-        # Game controller signals → control panel
-        self._controller.pan_changed.connect(
-            lambda v: self._window.control_panel.pan_changed.emit(v))
-        self._controller.tilt_changed.connect(
+        # ── Game controller signal wiring ──
+
+        # Analog axes
+        self._controller.winch_speed_changed.connect(self._on_winch_speed)
+        self._controller.plate_yaw_changed.connect(self._on_plate_yaw)
+        self._controller.gimbal_pitch_changed.connect(
             lambda v: self._window.control_panel.tilt_changed.emit(v))
+        self._controller.gimbal_yaw_changed.connect(
+            lambda v: self._window.control_panel.pan_changed.emit(v))
+        self._controller.light_brightness.connect(self._on_light_brightness)
+        self._controller.descent_speed_limit.connect(self._on_descent_limit)
+
+        # Safety
         self._controller.e_stop.connect(self._emergency_stop)
-        self._controller.tracking_toggle.connect(
-            lambda: self._switch_tracking_mode(
-                "precise" if self.config.tracking_mode == "fast" else "fast"
-            ))
+        self._controller.lock_state_changed.connect(self._on_lock_state_changed)
+
+        # Digital actions
+        self._controller.drop_to_3m.connect(self._on_drop_to_3m)
+        self._controller.body_recenter.connect(self._on_body_recenter)
+        self._controller.gimbal_recenter.connect(self._on_gimbal_recenter)
+        self._controller.all_recenter.connect(self._on_all_recenter)
+        self._controller.tracking_toggle.connect(self._on_tracking_toggle)
+        self._controller.record_toggle.connect(self._on_record_toggle)
+        self._controller.hud_toggle.connect(self._on_hud_toggle)
+        self._controller.roll_recenter.connect(self._on_roll_recenter)
+        self._controller.preset_cycle.connect(self._on_preset_cycle)
+
+        # Sensitivity
+        self._controller.winch_sensitivity_changed.connect(self._on_winch_sens_changed)
+        self._controller.plate_sensitivity_changed.connect(self._on_plate_sens_changed)
 
         # GoPro commands → direct HTTP through Pi proxy
         self._window.gopro_command.connect(self._on_gopro_command)
@@ -196,7 +227,7 @@ class HostApp:
         self._registry_timer.start(1000)
         self._telemetry_timer.start(50)  # drain incoming queue at 20 Hz
 
-        self._window.showFullScreen()
+        self._window.show()
         self._controller.start()
         self._recorder.start()
         self._update_tracking_status()
@@ -229,15 +260,15 @@ class HostApp:
         asyncio.ensure_future(self._udp_recv_loop())
         asyncio.ensure_future(self._ws_recv_loop())
 
-        # Start GoPro HTTP client (talks through Pi proxy)
+        # Start GoPro HTTP client (via Pi TCP forward)
         await self._gopro.open()
 
         # Start video stream receiver if using real stream (not mock)
         if isinstance(self._video_source, StreamReceiver):
             await self._video_source.start()
 
-        # Poll Pi for PCR-based stream latency + GoPro status
-        asyncio.ensure_future(self._poll_pi_stream_latency())
+        # GoPro lifecycle: detect camera, start viewfinder, monitor status
+        asyncio.ensure_future(self._manage_gopro_lifecycle())
         asyncio.ensure_future(self._poll_gopro_status())
 
     async def _udp_recv_loop(self):
@@ -256,21 +287,28 @@ class HostApp:
             except asyncio.TimeoutError:
                 pass
 
-    async def _poll_pi_stream_latency(self):
-        """Poll Pi /stream/status for PCR-based GoPro→Pi latency."""
-        import json
-        from urllib.request import urlopen
-        loop = asyncio.get_event_loop()
-        url = f"http://{self.config.pi_address}:{self.config.pi_ws_port}/stream/status"
+    async def _manage_gopro_lifecycle(self):
+        """Detect GoPro, start viewfinder, restart on disconnect.
+
+        Host HTTP → Pi:8080 (socat TCP forward) → GoPro:8080.
+        GoPro UDP → Pi:8554 (SNAT makes GoPro see Pi as client) → Host:8554.
+        """
+        stream_started = False
         while self._running:
             try:
-                resp = await loop.run_in_executor(
-                    None, lambda: urlopen(url, timeout=2))
-                data = json.loads(resp.read())
-                self._pi_stream_latency_ms = float(data.get("pcr_latency_ms", 0))
-            except Exception:
-                pass
-            await asyncio.sleep(2)  # 0.5 Hz poll is plenty
+                ready = await self._gopro.is_ready()
+                if ready and not stream_started:
+                    logger.info("GoPro detected, starting viewfinder stream...")
+                    await self._gopro.start_viewfinder(port=8554)
+                    stream_started = True
+                    logger.info("GoPro viewfinder stream started (UDP → Pi:8554)")
+                elif not ready and stream_started:
+                    logger.warning("GoPro disconnected, will restart viewfinder on reconnect")
+                    stream_started = False
+            except Exception as e:
+                logger.warning("GoPro lifecycle error: %s", e)
+                stream_started = False
+            await asyncio.sleep(3)
 
     async def _poll_gopro_status(self):
         """Poll GoPro camera state through Pi proxy (0.5 Hz).
@@ -519,6 +557,124 @@ class HostApp:
         self._window.gopro_probe_result.emit(
             result["setting"], result["current_option"],
             result["available"], result["probe_changed"])
+
+    # ── Game controller action handlers ──
+
+    def _on_winch_speed(self, speed: float):
+        """Winch speed from left stick Y. Positive = reel in (ascend)."""
+        self._schedule_async(self._udp.send(
+            cmd_servo_set("host", 2, float(speed))))
+        # Update plate sign based on winch direction
+        direction = self._controller.winch_direction
+        self._controller.set_plate_sign(direction)
+
+    def _on_plate_yaw(self, value: float):
+        """Plate yaw from left stick X. Sign already applied by controller."""
+        self._schedule_async(self._udp.send(
+            cmd_servo_set("host", 3, float(value))))
+
+    def _on_light_brightness(self, brightness: float):
+        """Light brightness from RT. -1 = auto mode, 0..1 = manual."""
+        if brightness < 0:
+            logger.info("Light: auto mode")
+        else:
+            logger.info("Light: manual %.0f%%", brightness * 100)
+        self._schedule_async(self._udp.send(
+            Message("host", "cmd.light", {"brightness": brightness})))
+
+    def _on_descent_limit(self, limit: float):
+        """Descent speed limit from LT. 0..1 (1=full speed when released)."""
+        self._window.dashboard.update_value("descent_limit", f"{limit * 100:.0f}%")
+
+    def _on_lock_state_changed(self, state: LockState):
+        """Start button: lock/unlock system."""
+        unlocked = state == LockState.UNLOCKED
+        status = "UNLOCKED" if unlocked else "LOCKED"
+        self._window.set_status_message(f"System: {status}")
+        color = "green" if unlocked else "red"
+        self._window.set_safety_state("locked" if not unlocked else "nominal", color)
+
+    def _on_drop_to_3m(self):
+        """LB: initiate drop to 3m depth."""
+        logger.info("Drop to 3m initiated")
+        self._window.set_status_message("Drop to 3m...")
+        self._schedule_async(self._udp.send(
+            Message("host", "cmd.winch_goto_depth", {"depth_m": 3.0})))
+
+    def _on_body_recenter(self):
+        """L3: recenter body (winch to 0, plate to 0)."""
+        logger.info("Body recenter")
+        self._schedule_async(self._udp.send(cmd_servo_set("host", 2, 0.0)))
+        self._schedule_async(self._udp.send(cmd_servo_set("host", 3, 0.0)))
+
+    def _on_gimbal_recenter(self):
+        """R3: recenter gimbal pitch/yaw."""
+        logger.info("Gimbal recenter")
+        self._window.control_panel.tilt_changed.emit(90.0)
+        self._window.control_panel.pan_changed.emit(90.0)
+
+    def _on_all_recenter(self):
+        """Logo: all recenter — body, gimbal, winch to neutral."""
+        logger.info("All recenter")
+        self._on_body_recenter()
+        self._on_gimbal_recenter()
+        self._on_roll_recenter()
+
+    def _on_tracking_toggle(self):
+        """RB: toggle auto-tracking on/off."""
+        if self.config.tracking_mode != "off":
+            self._switch_tracking_mode("off")
+        else:
+            self._switch_tracking_mode("fast")
+
+    def _on_record_toggle(self):
+        """B: toggle recording on/off."""
+        self._schedule_async(self._toggle_recording())
+
+    async def _toggle_recording(self):
+        try:
+            status = await self._gopro.get_status()
+            if status.recording:
+                await self._gopro.stop_recording()
+                logger.info("Recording stopped")
+            else:
+                await self._gopro.start_recording()
+                logger.info("Recording started")
+        except Exception as e:
+            logger.warning("Record toggle failed: %s", e)
+
+    def _on_hud_toggle(self):
+        """X: toggle HUD overlay."""
+        if hasattr(self._window.video_preview, 'toggle_hud'):
+            self._window.video_preview.toggle_hud()
+        else:
+            logger.info("HUD toggle (stub)")
+
+    def _on_roll_recenter(self):
+        """Y: force level, cancel IMU offset."""
+        logger.info("Roll recenter")
+        self._schedule_async(self._udp.send(
+            Message("host", "cmd.roll_reset", {})))
+
+    def _on_preset_cycle(self, direction: int):
+        """A: cycle camera preset (+1 forward, -1 backward)."""
+        logger.info("Preset cycle: %+d", direction)
+        # TODO: cycle through presets via CameraPresetService
+
+    def _on_winch_sens_changed(self, level: int):
+        """D-pad up/down: winch sensitivity level changed."""
+        curve = GameController.sensitivity_curve(level)
+        logger.info("Winch sensitivity: level %d, curve %.2f", level, curve)
+        self._window.dashboard.update_value("winch_sens", str(level))
+        # Apply curve to winch speed scaling
+        self._controller._max_winch_speed = 100.0 * curve
+
+    def _on_plate_sens_changed(self, level: int):
+        """D-pad left/right: plate sensitivity level changed."""
+        curve = GameController.sensitivity_curve(level)
+        logger.info("Plate sensitivity: level %d, curve %.2f", level, curve)
+        self._window.dashboard.update_value("plate_sens", str(level))
+        self._controller._max_servo_speed = 60.0 * curve
 
     def _on_get_presets(self):
         """Request preset list from camera via HTTP."""

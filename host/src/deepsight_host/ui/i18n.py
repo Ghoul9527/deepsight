@@ -28,9 +28,9 @@ _translations: dict[str, dict[str, str]] = {
     "safety.emergency": {"zh": "紧急", "en": "EMERGENCY"},
 
     "node.host": {"zh": "主机", "en": "Host"},
-    "node.pi": {"zh": "电子仓主控", "en": "Bay Main"},
-    "node.pico": {"zh": "电子仓副控", "en": "Bay Sub"},
-    "node.stm32": {"zh": "绞盘控制器", "en": "Winch Ctrl"},
+    "node.pi": {"zh": "水下网关", "en": "UW Gateway"},
+    "node.pico": {"zh": "控制器", "en": "Controller"},
+    "node.stm32": {"zh": "绞车驱动", "en": "Winch Driver"},
     "node.gopro": {"zh": "相机模组", "en": "Camera"},
     "node.state_healthy": {"zh": "正常", "en": "Healthy"},
     "node.state_degraded": {"zh": "降级", "en": "Degraded"},

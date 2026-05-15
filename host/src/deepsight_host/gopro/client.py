@@ -1,4 +1,4 @@
-"""GoPro HTTP client — talks to Pi's reverse proxy, controls GoPro directly."""
+"""GoPro HTTP client — talks to GoPro through Pi TCP forward (Pi:8080→GoPro:8080)."""
 
 from __future__ import annotations
 
@@ -74,14 +74,24 @@ class GoProStatus:
 
 
 class GoProClient:
-    """Async HTTP client for GoPro camera via Pi reverse proxy."""
+    """Async HTTP client for GoPro camera (via Pi TCP forward).
 
-    def __init__(self, proxy_url: str = "http://192.168.20.51:8080"):
-        self._base = proxy_url
+    GoPro checks the HTTP Host header and rejects requests with a
+    different host.  ``real_host`` is set as the Host header so GoPro
+    accepts the request even though the actual TCP connection goes to
+    the Pi's forwarded port.
+    """
+
+    def __init__(self, base_url: str = "http://192.168.20.51:8080",
+                 real_host: str = "172.25.132.51"):
+        self._base = base_url
+        self._real_host = real_host
         self._client: httpx.AsyncClient | None = None
 
     async def open(self):
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+        headers = {"Host": self._real_host}
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0), headers=headers)
 
     async def close(self):
         if self._client:
@@ -89,7 +99,7 @@ class GoProClient:
             self._client = None
 
     async def is_ready(self) -> bool:
-        """Check if GoPro is reachable through the proxy."""
+        """Check if GoPro is reachable."""
         try:
             r = await self._get("/gopro/camera/state")
             return r is not None
@@ -106,9 +116,14 @@ class GoProClient:
 
     # ── Stream ───────────────────────────────────────
 
-    async def start_viewfinder(self) -> bool:
-        """Start the camera's live preview (viewfinder) stream."""
-        return await self._get("/gopro/camera/stream/start")
+    async def start_viewfinder(self, port: int = 8554) -> bool:
+        """Start the camera's live preview (viewfinder) stream.
+
+        GoPro sends MPEG-TS UDP to the source IP of this HTTP request
+        on the specified port.  With Pi SNAT, GoPro sees the Pi's USB IP
+        as the source, so UDP goes to Pi:port.  Pi's socat relays to Host.
+        """
+        return await self._get(f"/gopro/camera/stream/start?port={port}")
 
     # ── Presets ──────────────────────────────────────
 
@@ -144,10 +159,14 @@ class GoProClient:
     # ── Status ───────────────────────────────────────
 
     async def get_status(self) -> GoProStatus:
-        """Snapshot of critical status fields."""
+        """Snapshot of critical status fields.
+
+        Raises ConnectionError when the GoPro is unreachable so callers
+        can detect offline state.
+        """
         data = await self._get_json("/gopro/camera/state")
         if not data:
-            return GoProStatus()
+            raise ConnectionError("GoPro unreachable")
         status = data.get("status", data)
         return GoProStatus(
             recording=bool(_safe_get(status, "encoding_active", 0)),
