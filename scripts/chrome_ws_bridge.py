@@ -21,7 +21,6 @@ import json
 import os
 import signal
 import sys
-import tempfile
 import threading
 import time
 
@@ -29,71 +28,17 @@ import websockets
 from websockets.asyncio.server import serve
 
 PORT = 9877
-HTML_PATH = os.path.join(tempfile.gettempdir(), "deepsight_gamepad.html")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+HTML_PATH = os.path.join(SCRIPT_DIR, "gamepad_tester.html")
 
 _gpad_state: dict = {"axes": [0.0] * 6, "buttons": [0] * 13, "hat": [0, 0]}
 _gpad_lock = threading.Lock()
 _server_ready = threading.Event()
 _running = True
 
-HTML = """<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>DeepSight Gamepad</title>
-<style>body{background:#111;color:#0f0;font:16px monospace;padding:20px}
-#log{white-space:pre;margin-top:10px;color:#888} .ok{color:#0f0} .err{color:red}</style>
-</head><body>
-<h1>DeepSight Gamepad Bridge</h1>
-<p id="status" class="err">Connecting...</p>
-<pre id="log"></pre>
-<script>
-const status = document.getElementById('status');
-const logEl = document.getElementById('log');
-function log(msg) { logEl.textContent += msg + '\\n'; }
 
-let ws;
-function connect() {
-  ws = new WebSocket('ws://localhost:""" + str(PORT) + """');
-  ws.onopen = () => { status.textContent = 'Connected — streaming gamepad data'; status.className='ok'; };
-  ws.onclose = () => { status.textContent = 'Disconnected — retrying...'; status.className='err'; setTimeout(connect, 2000); };
-  ws.onerror = () => ws.close();
-}
-connect();
-
-function poll() {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    const gps = navigator.getGamepads();
-    let gp = gps[0];
-    // Search all slots for a connected gamepad
-    if (!gp || !gp.connected) {
-      for (let i = 0; i < gps.length; i++) {
-        if (gps[i] && gps[i].connected) { gp = gps[i]; break; }
-      }
-    }
-    if (gp && gp.connected) {
-      const msg = JSON.stringify({
-        ts: Date.now() / 1000,
-        axes: [
-          gp.axes[0] || 0, gp.axes[1] || 0, gp.axes[2] || 0,
-          gp.axes[3] || 0, gp.axes[4] || 0, gp.axes[5] || 0,
-        ],
-        buttons: Array.from(gp.buttons).map(b => b.value > 0.5 ? 1 : 0),
-        hat: [
-          (gp.buttons[14]?.pressed ? 1 : 0) - (gp.buttons[15]?.pressed ? 1 : 0),
-          (gp.buttons[12]?.pressed ? 1 : 0) - (gp.buttons[13]?.pressed ? 1 : 0),
-        ],
-      });
-      ws.send(msg);
-    }
-  }
-  requestAnimationFrame(poll);
-}
-poll();
-</script></body></html>"""
-
-
-def write_html():
-    """Write the HTML page so the user can open it in Chrome."""
-    with open(HTML_PATH, "w") as f:
-        f.write(HTML)
+def get_url():
+    """Return the file:// URL for the gamepad tester page."""
     return f"file://{HTML_PATH}"
 
 
@@ -132,7 +77,7 @@ async def ws_handler(websocket):
 
 async def main_async():
     global _running
-    url = write_html()
+    url = get_url()
 
     server = await serve(
         ws_handler, "127.0.0.1", PORT, ping_interval=None

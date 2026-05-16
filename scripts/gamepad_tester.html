@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSight Gamepad Tester</title>
+<style>
+:root {
+  --bg: #1a1a2e;
+  --panel: #16213e;
+  --border: #0f3460;
+  --text: #e0e0e0;
+  --dim: #888;
+  --accent: #e94560;
+  --green: #00c853;
+  --blue: #448aff;
+  --orange: #ff9100;
+  --yellow: #ffd600;
+  --highlight: rgba(233, 69, 96, 0.7);
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* ── Left Panel ──────────────────────────────────────── */
+#left-panel {
+  width: 380px;
+  min-width: 380px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 16px;
+  gap: 12px;
+}
+
+#left-panel h2 {
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
+.panel-section {
+  background: rgba(0,0,0,0.25);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.panel-section h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--dim);
+  margin-bottom: 8px;
+}
+
+/* Info table */
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.info-row .label { color: var(--dim); }
+.info-row .value { color: var(--green); }
+.info-row .value.warn { color: var(--orange); }
+
+/* Axis table */
+.axis-row {
+  display: grid;
+  grid-template-columns: 32px 1fr 60px;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 12px;
+}
+.axis-name { color: var(--text); font-weight: 600; }
+.axis-bar {
+  height: 14px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 3px;
+  position: relative;
+  overflow: hidden;
+}
+.axis-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.05s linear, background 0.15s;
+  position: absolute;
+}
+.axis-fill.positive { background: var(--blue); right: 50%; }
+.axis-fill.negative { background: var(--orange); left: 50%; }
+.axis-center {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  background: rgba(255,255,255,0.2);
+}
+.axis-val { color: var(--dim); text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Button grid */
+.btn-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+}
+.btn-cell {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 6px;
+  font-size: 11px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.03);
+  transition: all 0.08s;
+}
+.btn-cell.pressed {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 0 8px var(--highlight);
+}
+.btn-idx { color: var(--dim); }
+.btn-cell.pressed .btn-idx { color: rgba(255,255,255,0.8); }
+
+/* D-pad indicator */
+.dpad-indicator {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-size: 12px;
+}
+.dpad-arrow {
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.05);
+  transition: all 0.08s;
+  font-size: 14px;
+}
+.dpad-arrow.active { background: var(--accent); box-shadow: 0 0 10px var(--highlight); }
+
+/* Poll rate */
+.poll-rate { font-size: 28px; font-weight: 700; color: var(--green); }
+.poll-unit { font-size: 12px; color: var(--dim); }
+
+/* ── Right Area (Gamepad) ────────────────────────────── */
+#gamepad-area {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+#gamepad-svg {
+  width: 620px;
+  height: 420px;
+}
+
+/* Stick position indicators */
+.stick-pos {
+  transition: cx 0.03s linear, cy 0.03s linear;
+}
+
+/* Button glow animation */
+@keyframes btnPulse {
+  0% { filter: drop-shadow(0 0 2px var(--accent)); }
+  50% { filter: drop-shadow(0 0 12px var(--accent)); }
+  100% { filter: drop-shadow(0 0 2px var(--accent)); }
+}
+.btn-pressed {
+  animation: btnPulse 0.3s ease-out;
+}
+
+/* Trigger fill */
+.trigger-fill {
+  transition: height 0.05s linear;
+}
+
+/* Connection indicator */
+#conn-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 6px;
+}
+#conn-dot.connected { background: var(--green); box-shadow: 0 0 6px var(--green); }
+#conn-dot.disconnected { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+
+/* Status bar */
+#status-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  font-size: 11px;
+  gap: 20px;
+}
+#status-bar span { color: var(--dim); }
+#status-bar .ok { color: var(--green); }
+
+</style>
+</head>
+<body>
+
+<!-- ── Left Panel ────────────────────────────────────── -->
+<div id="left-panel">
+  <div style="display:flex;align-items:center;gap:8px;">
+    <span id="conn-dot" class="disconnected"></span>
+    <h2 id="controller-name">No Controller</h2>
+  </div>
+
+  <div class="panel-section">
+    <h3>Controller Info</h3>
+    <div class="info-row"><span class="label">ID</span><span class="value" id="info-id">-</span></div>
+    <div class="info-row"><span class="label">Connected</span><span class="value warn" id="info-conn">No</span></div>
+    <div class="info-row"><span class="label">Mapping</span><span class="value" id="info-mapping">-</span></div>
+    <div class="info-row"><span class="label">Buttons</span><span class="value" id="info-btns">-</span></div>
+    <div class="info-row"><span class="label">Axes</span><span class="value" id="info-axes">-</span></div>
+    <div class="info-row"><span class="label">Poll Rate</span><span class="value"><span class="poll-rate" id="info-hz">0</span><span class="poll-unit"> Hz</span></span></div>
+  </div>
+
+  <div class="panel-section">
+    <h3>Axes</h3>
+    <div id="axes-table"></div>
+  </div>
+
+  <div class="panel-section">
+    <h3>Buttons</h3>
+    <div class="btn-grid" id="btn-grid"></div>
+  </div>
+
+  <div class="panel-section">
+    <h3>D-Pad</h3>
+    <div class="dpad-indicator">
+      <span class="dpad-arrow" id="dup">▲</span>
+      <span class="dpad-arrow" id="ddown">▼</span>
+      <span class="dpad-arrow" id="dleft">◀</span>
+      <span class="dpad-arrow" id="dright">▶</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Gamepad Graphic ────────────────────────────────── -->
+<div id="gamepad-area">
+<svg id="gamepad-svg" viewBox="0 0 620 420" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bodyGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3a3a4a"/>
+      <stop offset="100%" stop-color="#222230"/>
+    </linearGradient>
+    <linearGradient id="gripL" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#333345"/>
+      <stop offset="100%" stop-color="#1a1a28"/>
+    </linearGradient>
+    <linearGradient id="gripR" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#333345"/>
+      <stop offset="100%" stop-color="#1a1a28"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Controller body -->
+  <path d="M120,80 Q130,30 210,35 L410,35 Q490,30 500,80 Q515,150 510,240 Q505,350 420,370 L360,370 Q340,370 335,355 L335,340 Q340,325 360,320 L410,320 Q470,310 475,240 Q478,160 470,100 L420,70 L200,70 Q150,70 140,100 Q132,160 135,240 Q140,310 200,320 L250,320 Q270,320 275,335 L275,355 Q270,370 250,370 L200,370 Q115,350 105,240 Q98,150 120,80Z"
+        fill="url(#bodyGrad)" stroke="#1a1a2e" stroke-width="2"/>
+
+  <!-- Controller face plate -->
+  <path d="M130,85 Q140,40 210,42 L410,42 Q480,40 490,85 Q500,140 498,200 Q495,260 460,300 Q440,315 420,318 L200,318 Q180,315 160,300 Q125,260 120,200 Q118,140 130,85Z"
+        fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+
+  <!-- ── D-Pad ──────────────────────────────────────── -->
+  <g transform="translate(175, 180)">
+    <!-- Center circle -->
+    <circle cx="0" cy="0" r="6" fill="rgba(255,255,255,0.08)"/>
+    <!-- Up -->
+    <path id="dpad-up" d="M-10,-8 L10,-8 L10,-28 L-10,-28Z" fill="#2a2a3a" stroke="rgba(255,255,255,0.15)" stroke-width="1" rx="3"/>
+    <!-- Down -->
+    <path id="dpad-down" d="M-10,8 L10,8 L10,28 L-10,28Z" fill="#2a2a3a" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
+    <!-- Left -->
+    <path id="dpad-left" d="M-28,-10 L-8,-10 L-8,10 L-28,10Z" fill="#2a2a3a" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
+    <!-- Right -->
+    <path id="dpad-right" d="M8,-10 L28,-10 L28,10 L8,10Z" fill="#2a2a3a" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
+  </g>
+
+  <!-- ── Left Stick ──────────────────────────────────── -->
+  <g transform="translate(200, 260)">
+    <!-- Stick well -->
+    <circle cx="0" cy="0" r="32" fill="rgba(0,0,0,0.3)" stroke="rgba(255,255,255,0.1)" stroke-width="2"/>
+    <circle cx="0" cy="0" r="28" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>
+    <!-- Crosshair -->
+    <line x1="-28" y1="0" x2="28" y2="0" stroke="rgba(255,255,255,0.06)" stroke-width="0.5"/>
+    <line x1="0" y1="-28" x2="0" y2="28" stroke="rgba(255,255,255,0.06)" stroke-width="0.5"/>
+    <!-- Stick cap -->
+    <circle id="stick-left" class="stick-pos" cx="0" cy="0" r="16" fill="#3a3a50" stroke="rgba(255,255,255,0.2)" stroke-width="1.5"/>
+    <circle cx="0" cy="0" r="10" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
+    <!-- L3 label -->
+    <text x="0" y="52" text-anchor="middle" fill="var(--dim)" font-size="10">L3</text>
+  </g>
+
+  <!-- ── Right Stick ─────────────────────────────────── -->
+  <g transform="translate(420, 260)">
+    <circle cx="0" cy="0" r="32" fill="rgba(0,0,0,0.3)" stroke="rgba(255,255,255,0.1)" stroke-width="2"/>
+    <circle cx="0" cy="0" r="28" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>
+    <line x1="-28" y1="0" x2="28" y2="0" stroke="rgba(255,255,255,0.06)" stroke-width="0.5"/>
+    <line x1="0" y1="-28" x2="0" y2="28" stroke="rgba(255,255,255,0.06)" stroke-width="0.5"/>
+    <circle id="stick-right" class="stick-pos" cx="0" cy="0" r="16" fill="#3a3a50" stroke="rgba(255,255,255,0.2)" stroke-width="1.5"/>
+    <circle cx="0" cy="0" r="10" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"/>
+    <text x="0" y="52" text-anchor="middle" fill="var(--dim)" font-size="10">R3</text>
+  </g>
+
+  <!-- ── Face Buttons ────────────────────────────────── -->
+  <!-- Y button (top) -->
+  <circle id="btn-Y" cx="455" cy="115" r="12" fill="#2a2a3a" stroke="rgba(255,255,255,0.2)" stroke-width="1.5"/>
+  <text x="455" y="119" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold" pointer-events="none">Y</text>
+
+  <!-- A button (bottom) -->
+  <circle id="btn-A" cx="455" cy="155" r="12" fill="#2a2a3a" stroke="rgba(255,255,255,0.2)" stroke-width="1.5"/>
+  <text x="455" y="159" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold" pointer-events="none">A</text>
+
+  <!-- X button (left) -->
+  <circle id="btn-X" cx="435" cy="135" r="12" fill="#2a2a3a" stroke="rgba(255,255,255,0.2)" stroke-width="1.5"/>
+  <text x="435" y="139" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold" pointer-events="none">X</text>
+
+  <!-- B button (right) -->
+  <circle id="btn-B" cx="475" cy="135" r="12" fill="#2a2a3a" stroke="rgba(255,255,255,0.2)" stroke-width="1.5"/>
+  <text x="475" y="139" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold" pointer-events="none">B</text>
+
+  <!-- ── Menu Buttons ────────────────────────────────── -->
+  <!-- Back / Select -->
+  <rect id="btn-back" x="280" y="148" width="18" height="12" rx="3" fill="#2a2a3a" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
+  <!-- Start -->
+  <rect id="btn-start" x="322" y="148" width="18" height="12" rx="3" fill="#2a2a3a" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
+  <!-- Labels -->
+  <text x="289" y="175" text-anchor="middle" fill="var(--dim)" font-size="8">Back</text>
+  <text x="331" y="175" text-anchor="middle" fill="var(--dim)" font-size="8">Start</text>
+
+  <!-- Home button -->
+  <circle id="btn-home" cx="310" cy="120" r="10" fill="#2a2a3a" stroke="rgba(255,255,255,0.15)" stroke-width="1.5"/>
+  <!-- House icon -->
+  <path d="M305,125 L305,118 L310,113 L315,118 L315,125" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
+
+  <!-- ── Shoulder Buttons ────────────────────────────── -->
+  <!-- LB -->
+  <path id="btn-lb" d="M145,42 Q155,50 155,65 L155,75 L180,75 L180,65 Q180,50 190,42 L190,35 L145,35Z"
+        fill="#2a2a3a" stroke="rgba(255,255,255,0.15)" stroke-width="1.5"/>
+  <text x="167" y="62" text-anchor="middle" fill="var(--dim)" font-size="9" font-weight="bold" pointer-events="none">LB</text>
+
+  <!-- RB -->
+  <path id="btn-rb" d="M430,42 Q440,50 440,65 L440,75 L465,75 L465,65 Q465,50 475,42 L475,35 L430,35Z"
+        fill="#2a2a3a" stroke="rgba(255,255,255,0.15)" stroke-width="1.5"/>
+  <text x="452" y="62" text-anchor="middle" fill="var(--dim)" font-size="9" font-weight="bold" pointer-events="none">RB</text>
+
+  <!-- ── Triggers ────────────────────────────────────── -->
+  <!-- LT -->
+  <g transform="translate(133, 25)">
+    <rect x="0" y="0" width="46" height="16" rx="4" fill="#1a1a28" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+    <rect id="trigger-lt-fill" x="2" y="2" width="42" height="0" rx="3" fill="var(--blue)" opacity="0.8"/>
+    <text x="23" y="11" text-anchor="middle" fill="var(--dim)" font-size="9" font-weight="bold">LT</text>
+  </g>
+
+  <!-- RT -->
+  <g transform="translate(443, 25)">
+    <rect x="0" y="0" width="46" height="16" rx="4" fill="#1a1a28" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+    <rect id="trigger-rt-fill" x="2" y="2" width="42" height="0" rx="3" fill="var(--blue)" opacity="0.8"/>
+    <text x="23" y="11" text-anchor="middle" fill="var(--dim)" font-size="9" font-weight="bold">RT</text>
+  </g>
+
+  <!-- ── Labels ──────────────────────────────────────── -->
+  <text x="62" y="28" fill="var(--dim)" font-size="9">LT</text>
+  <text x="548" y="28" fill="var(--dim)" font-size="9">RT</text>
+  <text x="80" y="100" fill="var(--dim)" font-size="9">LB</text>
+  <text x="528" y="100" fill="var(--dim)" font-size="9">RB</text>
+
+  <!-- Connection text -->
+  <text id="gp-status" x="310" y="400" text-anchor="middle" fill="var(--dim)" font-size="13">
+    Waiting for controller...
+  </text>
+</svg>
+</div>
+
+<!-- ── Status Bar ────────────────────────────────────── -->
+<div id="status-bar">
+  <span id="sb-conn">● Disconnected</span>
+  <span id="sb-poll">Poll: 0 Hz</span>
+  <span id="sb-latency" style="margin-left:auto;">Latency: -- ms</span>
+</div>
+
+<script>
+// ── Constants ──────────────────────────────────────────
+const AXIS_NAMES = ['LX', 'LY', 'RX', 'RY', 'LT', 'RT'];
+const AXIS_COLORS = ['#ff9100', '#ff9100', '#448aff', '#448aff', '#e94560', '#00c853'];
+// SDL2 button order labels (what we display and send to bridge)
+const SDL2_LABELS = ['A','B','X','Y','LB','RB','Back','Start','L3','R3','Home','LTd','RTd'];
+
+// Web Gamepad API ("standard" mapping) → SDL2 button index
+// Web:  0=A  1=B  2=X  3=Y  4=LB  5=RB  6=LT  7=RT  8=Back  9=Start  10=L3  11=R3  12=↑  13=↓  14=←  15=→  16=Home
+// SDL2: 0=A  1=B  2=X  3=Y  4=LB  5=RB  6=Back  7=Start  8=L3   9=R3    10=Home  11=LTd  12=RTd
+// D-pad (web 12-15) → hat, not buttons
+const WEB2SDL2 = [
+   0,   // 0: A → 0
+   1,   // 1: B → 1
+   2,   // 2: X → 2
+   3,   // 3: Y → 3
+   4,   // 4: LB → 4
+   5,   // 5: RB → 5
+  11,   // 6: LT → 11 (LTd)
+  12,   // 7: RT → 12 (RTd)
+   6,   // 8: Back → 6
+   7,   // 9: Start → 7
+   8,   // 10: L3 → 8
+   9,   // 11: R3 → 9
+  -1,   // 12: D-pad Up → hat
+  -1,   // 13: D-pad Down → hat
+  -1,   // 14: D-pad Left → hat
+  -1,   // 15: D-pad Right → hat
+  10,   // 16: Home → 10
+];
+
+// SDL2 button index → SVG element ID (for visual highlight)
+const SDL2_SVG = {
+  0: 'btn-A', 1: 'btn-B', 2: 'btn-X', 3: 'btn-Y',
+  4: 'btn-lb', 5: 'btn-rb', 6: 'btn-back', 7: 'btn-start',
+  8: null, 9: null, 10: 'btn-home', 11: null, 12: null,
+};
+
+// ── State ─────────────────────────────────────────────
+let pollCount = 0;
+let pollRates = [];
+let lastPollTime = performance.now();
+let ws = null;
+
+// ── Build UI elements ──────────────────────────────────
+(function buildUI() {
+  const axesTable = document.getElementById('axes-table');
+  AXIS_NAMES.forEach((name, i) => {
+    const row = document.createElement('div');
+    row.className = 'axis-row';
+    row.innerHTML = `
+      <span class="axis-name" style="color:${AXIS_COLORS[i]}">${name}</span>
+      <div class="axis-bar">
+        <div class="axis-fill negative" id="ax-neg-${i}"></div>
+        <div class="axis-center"></div>
+        <div class="axis-fill positive" id="ax-pos-${i}"></div>
+      </div>
+      <span class="axis-val" id="ax-val-${i}">0.0000</span>
+    `;
+    axesTable.appendChild(row);
+  });
+
+  const btnGrid = document.getElementById('btn-grid');
+  SDL2_LABELS.forEach((name, i) => {
+    const cell = document.createElement('div');
+    cell.className = 'btn-cell';
+    cell.id = `btn-cell-${i}`;
+    cell.innerHTML = `<span class="btn-idx">#${i}</span><span>${name}</span>`;
+    btnGrid.appendChild(cell);
+  });
+})();
+
+// ── SVG element references ─────────────────────────────
+const svgEls = {
+  stickL: document.getElementById('stick-left'),
+  stickR: document.getElementById('stick-right'),
+  triggerL: document.getElementById('trigger-lt-fill'),
+  triggerR: document.getElementById('trigger-rt-fill'),
+  dpadUp: document.getElementById('dpad-up'),
+  dpadDown: document.getElementById('dpad-down'),
+  dpadLeft: document.getElementById('dpad-left'),
+  dpadRight: document.getElementById('dpad-right'),
+  gpStatus: document.getElementById('gp-status'),
+};
+
+// ── Apply state to UI ──────────────────────────────────
+// data.buttons is already in SDL2 order (13 elements)
+// data.hat is [x, y]: x = right(1)/left(-1), y = up(1)/down(-1)
+function applyState(data) {
+  const { axes, buttons, hat } = data;
+  const now = performance.now();
+
+  // Poll rate
+  pollCount++;
+  const dt = now - lastPollTime;
+  lastPollTime = now;
+  pollRates.push(dt);
+  if (pollRates.length > 30) pollRates.shift();
+
+  const avgDt = pollRates.reduce((a,b)=>a+b, 0) / pollRates.length;
+  const hz = avgDt > 0 ? (1000 / avgDt) : 0;
+  document.getElementById('info-hz').textContent = Math.round(hz);
+  document.getElementById('sb-poll').textContent = `Poll: ${Math.round(hz)} Hz`;
+  document.getElementById('sb-latency').textContent = `Latency: ${dt.toFixed(1)} ms`;
+
+  document.getElementById('info-conn').textContent = 'Yes';
+  document.getElementById('info-conn').className = 'value';
+  document.getElementById('sb-conn').innerHTML = '● Connected';
+  document.getElementById('sb-conn').className = 'ok';
+  document.getElementById('conn-dot').className = 'connected';
+
+  // Axes
+  const hasAxis = axes.some(a => Math.abs(a) > 0.02);
+  for (let i = 0; i < 6; i++) {
+    const v = axes[i] || 0;
+    document.getElementById(`ax-val-${i}`).textContent = v.toFixed(4);
+    document.getElementById(`ax-pos-${i}`).style.width = v >= 0 ? (v * 50) + '%' : '0%';
+    document.getElementById(`ax-neg-${i}`).style.width = v < 0 ? (Math.abs(v) * 50) + '%' : '0%';
+  }
+
+  // Buttons (SDL2 order)
+  for (let i = 0; i < 13; i++) {
+    const pressed = buttons[i] === 1;
+    const cell = document.getElementById(`btn-cell-${i}`);
+    if (cell) cell.classList.toggle('pressed', pressed);
+
+    // SVG highlight
+    const svgId = SDL2_SVG[i];
+    if (svgId) {
+      const el = document.getElementById(svgId);
+      if (el) {
+        el.setAttribute('fill', pressed ? '#e94560' : '#2a2a3a');
+        el.setAttribute('stroke', pressed ? '#ff6b81' : (i >= 4 ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.2)'));
+        if (pressed) el.setAttribute('filter', 'url(#glow)');
+        else el.removeAttribute('filter');
+      }
+    }
+  }
+
+  // L3/R3 stick color (SDL2: L3=8, R3=9)
+  const l3 = buttons[8] === 1;
+  const r3 = buttons[9] === 1;
+  svgEls.stickL.setAttribute('fill', l3 ? '#e94560' : '#3a3a50');
+  if (l3) svgEls.stickL.setAttribute('filter', 'url(#glow)');
+  else svgEls.stickL.removeAttribute('filter');
+  svgEls.stickR.setAttribute('fill', r3 ? '#e94560' : '#3a3a50');
+  if (r3) svgEls.stickR.setAttribute('filter', 'url(#glow)');
+  else svgEls.stickR.removeAttribute('filter');
+
+  // Sticks position
+  // Web API: axes[1] = -1 (up), +1 (down). SVG y: negative=up, positive=down.
+  // So axes[1] maps directly to SVG cy (no negation needed).
+  const maxDisp = 16;
+  svgEls.stickL.setAttribute('cx', (axes[0] || 0) * maxDisp);
+  svgEls.stickL.setAttribute('cy', (axes[1] || 0) * maxDisp);
+  svgEls.stickR.setAttribute('cx', (axes[2] || 0) * maxDisp);
+  svgEls.stickR.setAttribute('cy', (axes[3] || 0) * maxDisp);
+
+  // Triggers: analog axes (4=LT, 5=RT) or digital buttons (11=LTd, 12=RTd)
+  const ltVal = Math.max(axes[4] || 0, buttons[11] === 1 ? 1.0 : 0);
+  const rtVal = Math.max(axes[5] || 0, buttons[12] === 1 ? 1.0 : 0);
+  svgEls.triggerL.setAttribute('height', Math.round(ltVal * 12));
+  svgEls.triggerR.setAttribute('height', Math.round(rtVal * 12));
+
+  // D-pad
+  const hx = hat ? hat[0] : 0;
+  const hy = hat ? hat[1] : 0;
+
+  const dpadDirs = {
+    up:    svgEls.dpadUp,
+    down:  svgEls.dpadDown,
+    left:  svgEls.dpadLeft,
+    right: svgEls.dpadRight,
+  };
+  const active = {
+    up:    hy > 0,
+    down:  hy < 0,
+    left:  hx < 0,
+    right: hx > 0,
+  };
+  Object.keys(dpadDirs).forEach(dir => {
+    if (dpadDirs[dir]) {
+      dpadDirs[dir].setAttribute('fill', active[dir] ? '#e94560' : '#2a2a3a');
+      if (active[dir]) dpadDirs[dir].setAttribute('filter', 'url(#glow)');
+      else dpadDirs[dir].removeAttribute('filter');
+    }
+  });
+
+  // D-pad UI panel arrows
+  ['dup','ddown','dleft','dright'].forEach((elId, i) => {
+    const el = document.getElementById(elId);
+    if (el) el.classList.toggle('active', active[['up','down','left','right'][i]]);
+  });
+
+  if (hasAxis || buttons.some(b => b !== 0)) {
+    svgEls.gpStatus.textContent = '';
+  }
+}
+
+// ── WebSocket ──────────────────────────────────────────
+function connectWS() {
+  ws = new WebSocket('ws://localhost:9877');
+  ws.onopen = () => {
+    document.getElementById('sb-conn').innerHTML = '● Connected (bridge)';
+    document.getElementById('sb-conn').className = 'ok';
+    document.getElementById('conn-dot').className = 'connected';
+  };
+  ws.onclose = () => {
+    document.getElementById('sb-conn').innerHTML = '● Bridge disconnected';
+    document.getElementById('sb-conn').className = '';
+    document.getElementById('conn-dot').className = 'disconnected';
+    setTimeout(connectWS, 2000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+// ── Gamepad Polling ────────────────────────────────────
+function pollGamepad() {
+  const gps = navigator.getGamepads();
+  let gp = null;
+  for (let i = 0; i < gps.length; i++) {
+    if (gps[i] && gps[i].connected) { gp = gps[i]; break; }
+  }
+
+  if (gp && gp.connected) {
+    document.getElementById('controller-name').textContent = gp.id || 'Gamepad';
+    document.getElementById('info-id').textContent = gp.id ? gp.id.slice(0, 40) : '-';
+    document.getElementById('info-mapping').textContent = gp.mapping || 'standard';
+    document.getElementById('info-btns').textContent = gp.buttons.length;
+    document.getElementById('info-axes').textContent = gp.axes.length;
+
+    // Axes: read directly (no remapping needed for axes)
+    const axes = [];
+    for (let i = 0; i < 6; i++) axes.push(gp.axes[i] || 0);
+
+    // Buttons: remap Web API → SDL2 order
+    const sdl2Buttons = new Array(13).fill(0);
+    for (let i = 0; i < Math.min(gp.buttons.length, 17); i++) {
+      if (gp.buttons[i].pressed) {
+        const sdl2Idx = WEB2SDL2[i];
+        if (sdl2Idx >= 0 && sdl2Idx < 13) sdl2Buttons[sdl2Idx] = 1;
+      }
+    }
+
+    // D-pad hat from Web API buttons 12-15
+    const hat = [
+      (gp.buttons[15]?.pressed ? 1 : 0) - (gp.buttons[14]?.pressed ? 1 : 0),
+      (gp.buttons[12]?.pressed ? 1 : 0) - (gp.buttons[13]?.pressed ? 1 : 0),
+    ];
+
+    applyState({ axes, buttons: sdl2Buttons, hat });
+
+    // Send SDL2-remapped data to bridge
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ ts: Date.now() / 1000, axes, buttons: sdl2Buttons, hat }));
+    }
+  } else {
+    document.getElementById('controller-name').textContent = 'No Controller';
+    document.getElementById('info-conn').textContent = 'No';
+    document.getElementById('info-conn').className = 'value warn';
+    document.getElementById('conn-dot').className = 'disconnected';
+    document.getElementById('sb-conn').innerHTML = '● No Controller';
+    document.getElementById('sb-conn').className = '';
+  }
+
+  requestAnimationFrame(pollGamepad);
+}
+
+connectWS();
+pollGamepad();
+</script>
+</body>
+</html>
