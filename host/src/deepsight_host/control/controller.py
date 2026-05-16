@@ -1,16 +1,29 @@
-"""Gamepad input service for Logitech F310 and compatible controllers.
+"""Gamepad input service — config-driven mapping with multi-backend support.
 
 All gamepad input flows through this layer. Business logic never touches pygame
 or raw button indices directly — everything is mapped through config.
 
+Backends (tried in order):
+  1. pygame (SDL2) — primary backend on Windows/Linux for all controllers.
+  2. GCController bridge (macOS) — native GameController.framework via signed
+     Swift helper. Apple Development signing is sufficient.
+  3. Chrome WebSocket bridge (macOS) — fallback using Chrome's Web Gamepad API.
+     No signing required, but needs Chrome running.
+  4. F310 USB bridge — deprecated (broken on macOS 26+, kernel HIDRM block).
+
 Architecture:
   GameController (this file)  →  signals  →  Host app / control pipeline
-  Config-driven mapping; no F310 specifics hardcoded in business logic.
+  Config-driven mapping; no controller specifics hardcoded in business logic.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import subprocess
+import sys
+import threading
 import time
 from enum import Enum
 from typing import Any
@@ -19,13 +32,34 @@ from PySide6.QtCore import QTimer, Signal, QObject
 
 logger = logging.getLogger("host.control.controller")
 
+# Chrome WebSocket bridge — macOS 26+ HIDRM workaround.
+# Uses Chrome's Web Gamepad API → local WebSocket → stdout JSON.
+# Chrome has Developer ID signing, bypassing HIDRM entirely.
+_CHROME_WS_BRIDGE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))),
+    "scripts", "chrome_ws_bridge.py",
+)
+
+# F310 D-mode USB bridge — macOS-only fallback, F310-specific.
+# Installed by scripts/setup_f310_bridge.sh with setuid root.
+_USB_BRIDGE_PATH = "/usr/local/bin/deepsight_f310_bridge"
+
+# GCController bridge — macOS native GameController.framework.
+# Works with Apple Development signing (NSApplication run loop required).
+# Compiled Swift binary, outputs SDL2-compatible JSON to stdout.
+_GC_BRIDGE_PATH = "/usr/local/bin/deepsight_gc_bridge"
+
 
 class LockState(Enum):
     LOCKED = "locked"
     UNLOCKED = "unlocked"
 
 
-# ── Fallback mapping (DirectInput / F310 layout) ──
+# ── Fallback mapping (DirectInput / F310 layout, SDL2 button order) ──
+# Button indices match SDL2 / pygame convention:
+#   0=A, 1=B, 2=X, 3=Y, 4=LB, 5=RB, 6=Back, 7=Start, 8=L3, 9=R3, 10=Home,
+#   11=LT (digital), 12=RT (digital)
 _FALLBACK_MAPPING: dict[str, Any] = {
     "name_patterns": [],
     "axes": {
@@ -33,14 +67,13 @@ _FALLBACK_MAPPING: dict[str, Any] = {
         "plate_yaw": {"axis": 0, "invert": False},
         "gimbal_pitch": {"axis": 3, "invert": True},
         "gimbal_yaw": {"axis": 2, "invert": False},
-        "light": {"axis": 5},
-        "descent_limit": {"axis": 4},
     },
     "buttons": {
         "drop_to_3m": 4, "body_recenter": 8, "gimbal_recenter": 9,
         "all_recenter": 10, "tracking": 5, "record": 1,
         "hud": 2, "roll_recenter": 3, "preset": 0,
         "e_stop": 6, "lock": 7,
+        "light_down": 11, "light_up": 12,
     },
     "dpad": {
         "winch_sens_up": [0, 1], "winch_sens_down": [0, -1],
@@ -88,8 +121,9 @@ class GameController(QObject):
     plate_yaw_changed = Signal(float)          # -1..1
     gimbal_pitch_changed = Signal(float)       # angle degrees
     gimbal_yaw_changed = Signal(float)         # angle degrees
-    light_brightness = Signal(float)           # -1=auto, 0..1=manual
-    descent_speed_limit = Signal(float)        # 0..1, 1=full speed when released
+
+    # ── Light ──
+    light_level_changed = Signal(int)          # 0..10, step by LT/RT triggers
 
     # ── Digital actions (edge-triggered, not held) ──
     e_stop = Signal()                          # Back — highest priority
@@ -141,6 +175,14 @@ class GameController(QObject):
         self._mappings = mappings or {}
         self._mapping: dict[str, Any] = _FALLBACK_MAPPING
 
+        # ── Bridge backends (macOS only) ──
+        self._use_bridge = False
+        self._bridge_proc: subprocess.Popen | None = None
+        self._bridge_state: dict[str, Any] = {
+            "axes": [0.0] * 6, "buttons": [0] * 13, "hat": [0, 0]}
+        self._bridge_lock = threading.Lock()
+        self._bridge_name = "Unknown (bridge)"
+
         # Lock state — system starts LOCKED
         self._locked = True
 
@@ -149,6 +191,9 @@ class GameController(QObject):
 
         # Plate direction sign: +1 or -1, set externally from winch direction
         self._plate_sign = 1.0
+
+        # Light brightness level: 0..10 (0%=off, 10=100%, default 5=50%)
+        self._light_level = 5
 
         # Smoothed axis values
         self._smooth_winch = 0.0
@@ -162,6 +207,7 @@ class GameController(QObject):
             "all_recenter": False, "tracking": False, "record": False,
             "hud": False, "roll_recenter": False, "preset": False,
             "e_stop": False, "lock": False,
+            "light_down": False, "light_up": False,
         }
 
         # A button short/long press tracking
@@ -179,9 +225,6 @@ class GameController(QObject):
             "plate_sens_left": 0.0, "plate_sens_right": 0.0,
         }
         self._DPAD_DEBOUNCE = 0.2  # seconds
-
-        # Light: manual vs auto mode
-        self._light_manual = False
 
         # Sensitivity levels (1-10)
         self._winch_sens_level = 5
@@ -223,56 +266,182 @@ class GameController(QObject):
         level = max(1, min(10, level))
         return 0.2 + (level / 5.0) * 0.8
 
+    # ── Bridge backends (macOS only) ──
+    #
+    # Both GCController bridge and F310 USB bridge output the same
+    # JSON format ({axes, buttons, hat}), so _read_bridge() and
+    # _poll_bridge() are shared.
+    #
+    # GC bridge: Apple GameController.framework via signed helper.
+    #   Needs one-time TCC permission grant.
+    # USB bridge: IOUSBHostDevice DeviceCapture, setuid root.
+    #   Last resort for F310 D-mode when GCController is blocked.
+
+    def _try_start_bridge(self, path: str, name: str) -> bool:
+        """Spawn a bridge subprocess and read the first JSON line."""
+        if sys.platform != "darwin":
+            logger.debug("Bridge: not on macOS, skipping %s", name)
+            return False
+
+        if not os.path.exists(path):
+            logger.info("Bridge binary not found: %s", path)
+            return False
+
+        try:
+            self._bridge_proc = subprocess.Popen(
+                [path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            line = self._bridge_proc.stdout.readline()
+            if not line:
+                raise RuntimeError("Bridge produced no output")
+
+            state = json.loads(line)
+            with self._bridge_lock:
+                self._bridge_state = state
+
+            self._use_bridge = True
+            self._bridge_name = name
+            logger.info("%s connected (%d buttons)", name, len(state.get("buttons", [])))
+            return True
+
+        except Exception as e:
+            logger.info("%s unavailable: %s", name, e)
+            if self._bridge_proc:
+                self._bridge_proc.terminate()
+                self._bridge_proc = None
+            return False
+
+    def _read_bridge(self):
+        """Read available JSON lines from bridge stdout."""
+        if not self._bridge_proc or self._bridge_proc.poll() is not None:
+            return
+
+        try:
+            import select
+            while True:
+                ready, _, _ = select.select(
+                    [self._bridge_proc.stdout], [], [], 0)
+                if not ready:
+                    break
+                line = self._bridge_proc.stdout.readline()
+                if not line:
+                    break
+                state = json.loads(line)
+                with self._bridge_lock:
+                    self._bridge_state = state
+        except Exception:
+            pass
+
     # ── Lifecycle ──
 
     def start(self) -> bool:
+        """Connect to a game controller, trying backends in order.
+
+        Backend priority:
+          1. pygame (SDL2) — primary on Windows/Linux, may work on macOS.
+          2. GCController bridge (macOS) — native GameController.framework
+             via signed Swift helper. Apple Development signing is sufficient.
+          3. Chrome WebSocket bridge (macOS) — fallback using Chrome's
+             Web Gamepad API. No signing required.
+          4. F310 USB bridge — deprecated (macOS 26+ kernel HIDRM block).
+        """
+        # ── Tier 1: pygame / SDL2 ──
         try:
             import pygame
             pygame.init()
             pygame.joystick.init()
+
+            count = pygame.joystick.get_count()
+            if count > 0:
+                self._joystick = pygame.joystick.Joystick(0)
+                self._joystick.init()
+
+                name = self._joystick.get_name()
+                self._mapping = _match_mapping(name, self._mappings)
+
+                self._connected = True
+                self._locked = True
+                logger.info(
+                    "Game controller connected: %s (axes=%d, buttons=%d, hats=%d) — LOCKED",
+                    name,
+                    self._joystick.get_numaxes(),
+                    self._joystick.get_numbuttons(),
+                    self._joystick.get_numhats(),
+                )
+                self._timer.start(1000 // self._poll_hz)
+                return True
+
+            logger.info("Game controller: no joystick detected via pygame")
         except (ImportError, Exception) as e:
-            logger.info("Game controller: %s", e)
-            return False
+            logger.info("Game controller: pygame unavailable (%s)", e)
 
-        count = pygame.joystick.get_count()
-        if count == 0:
-            logger.info("Game controller: no joystick detected")
-            return False
+        # ── Tier 2: GCController bridge (macOS, GameController.framework) ──
+        # Apple Development signing + NSApplication run loop is sufficient.
+        if self._try_start_bridge(
+            _GC_BRIDGE_PATH, "GCController bridge"
+        ):
+            self._mapping = _match_mapping(self._bridge_name, self._mappings)
+            self._connected = True
+            self._locked = True
+            self._timer.start(1000 // self._poll_hz)
+            return True
 
-        self._joystick = pygame.joystick.Joystick(0)
-        self._joystick.init()
+        # ── Tier 3: Chrome WebSocket bridge (macOS only) ──
+        # Fallback — uses Chrome's Web Gamepad API, no signing needed.
+        if self._try_start_bridge(
+            _CHROME_WS_BRIDGE_PATH, "Chrome WS bridge"
+        ):
+            self._mapping = _match_mapping(self._bridge_name, self._mappings)
+            self._connected = True
+            self._locked = True
+            self._timer.start(1000 // self._poll_hz)
+            return True
 
-        name = self._joystick.get_name()
-        self._mapping = _match_mapping(name, self._mappings)
+        # ── Tier 4: F310 USB bridge (deprecated, macOS 26+ HIDRM) ──
+        if self._try_start_bridge(
+            _USB_BRIDGE_PATH, "Logitech F310 (USB bridge)"
+        ):
+            self._mapping = _match_mapping(self._bridge_name, self._mappings)
+            self._connected = True
+            self._locked = True
+            self._timer.start(1000 // self._poll_hz)
+            return True
 
-        self._connected = True
-        self._locked = True
-        logger.info(
-            "Game controller connected: %s (axes=%d, buttons=%d, hats=%d) — LOCKED",
-            name,
-            self._joystick.get_numaxes(),
-            self._joystick.get_numbuttons(),
-            self._joystick.get_numhats(),
-        )
-
-        self._timer.start(1000 // self._poll_hz)
-        return True
+        return False
 
     def stop(self):
         self._timer.stop()
         if self._joystick is not None:
             self._joystick.quit()
             self._joystick = None
+        if self._bridge_proc:
+            self._use_bridge = False
+            self._bridge_proc.terminate()
+            try:
+                self._bridge_proc.wait(timeout=2)
+            except Exception:
+                self._bridge_proc.kill()
+            self._bridge_proc = None
+            logger.info("Bridge: disconnected")
         self._connected = False
         self._locked = True
-        logger.info("Game controller: disconnected")
 
     # ── Main poll loop ──
 
     def _poll(self):
-        if not self._connected or self._joystick is None:
+        if not self._connected:
             return
 
+        if self._use_bridge:
+            self._poll_bridge()
+        elif self._joystick is not None:
+            self._poll_pygame()
+
+    def _poll_pygame(self):
         try:
             import pygame
             pygame.event.pump()
@@ -282,6 +451,209 @@ class GameController(QObject):
         self._poll_axes()
         self._poll_buttons()
         self._poll_dpad()
+
+    def _poll_bridge(self):
+        """Read bridge data and emit the same signals as the pygame path.
+
+        Bridge outputs SDL2-compatible axis/button/hat indices in JSON,
+        so the same config mapping layer applies.
+        """
+        self._read_bridge()
+
+        with self._bridge_lock:
+            state = dict(self._bridge_state)
+
+        axes = state.get("axes", [0.0] * 6)
+        buttons = state.get("buttons", [0] * 13)
+        hat = state.get("hat", [0, 0])
+
+        m = self._mapping
+        dt = 1.0 / max(self._poll_hz, 1)
+        now = time.monotonic()
+
+        def bridge_axis(cfg_name: str, default: int = -1) -> float:
+            cfg = _get_axis_cfg(m, cfg_name)
+            idx = cfg.get("axis", default)
+            if idx < 0 or idx >= len(axes):
+                return 0.0
+            raw = axes[idx]
+            if abs(raw) < self._dead_zone:
+                return 0.0
+            sign = 1.0 if raw > 0 else -1.0
+            normalized = sign * (abs(raw) - self._dead_zone) / (1.0 - self._dead_zone)
+            if cfg.get("invert", False):
+                normalized = -normalized
+            return float(normalized)
+
+        def bridge_button(name: str) -> bool:
+            idx = _get_button_idx(m, name)
+            if idx is None or idx >= len(buttons):
+                return False
+            return bool(buttons[idx])
+
+        def bridge_edge(name: str) -> int:
+            cur = bridge_button(name)
+            prev = self._btn_prev.get(name, False)
+            self._btn_prev[name] = cur
+            if cur and not prev:
+                return 1
+            elif not cur and prev:
+                return -1
+            return 0
+
+        # ── Axes ──
+        raw_winch = bridge_axis("winch", 1)
+        if self._locked:
+            raw_winch = 0.0
+        self._smooth_winch += (raw_winch - self._smooth_winch) * self._smoothing_alpha
+        winch_val = self._smooth_winch * self._max_winch_speed
+        self.winch_speed_changed.emit(winch_val)
+        if abs(self._smooth_winch) > 0.01:
+            self._winch_direction = 1.0 if self._smooth_winch > 0 else -1.0
+
+        raw_plate = bridge_axis("plate_yaw", 0)
+        if self._locked:
+            raw_plate = 0.0
+        self._smooth_plate += (raw_plate - self._smooth_plate) * self._smoothing_alpha
+        self.plate_yaw_changed.emit(self._smooth_plate * self._plate_sign)
+
+        raw_gp = bridge_axis("gimbal_pitch", 3)
+        if self._locked:
+            raw_gp = 0.0
+        self._smooth_gimbal_pitch += (raw_gp - self._smooth_gimbal_pitch) * self._smoothing_alpha
+        gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._max_servo_speed * dt
+        self.gimbal_pitch_changed.emit(max(0.0, min(180.0, gimbal_pitch_angle)))
+
+        raw_gy = bridge_axis("gimbal_yaw", 2)
+        if self._locked:
+            raw_gy = 0.0
+        self._smooth_gimbal_yaw += (raw_gy - self._smooth_gimbal_yaw) * self._smoothing_alpha
+        gimbal_yaw_angle = 90.0 + self._smooth_gimbal_yaw * self._max_servo_speed * dt
+        self.gimbal_yaw_changed.emit(max(0.0, min(180.0, gimbal_yaw_angle)))
+
+        # ── Buttons (edge-triggered) ──
+        # E-stop (Back) — ALWAYS active
+        if bridge_edge("e_stop") == 1:
+            logger.warning("Game controller: E-STOP triggered (Back)")
+            self.e_stop.emit()
+
+        # Lock/Unlock (Start)
+        if bridge_edge("lock") == 1:
+            self._locked = not self._locked
+            state = LockState.UNLOCKED if not self._locked else LockState.LOCKED
+            self.lock_state_changed.emit(state)
+            logger.info("Game controller: %s", state.value.upper())
+            if self._locked:
+                self._smooth_winch = 0.0
+                self._smooth_plate = 0.0
+                self._smooth_gimbal_pitch = 0.0
+                self._smooth_gimbal_yaw = 0.0
+                self.winch_speed_changed.emit(0.0)
+                self.plate_yaw_changed.emit(0.0)
+
+        # ── Light brightness stepping (LT down, RT up) ──
+        # Active regardless of lock state (safety-neutral UI function).
+        if bridge_edge("light_down") == 1:
+            self._light_level = max(0, self._light_level - 1)
+            self.light_level_changed.emit(self._light_level)
+            logger.info("Light: %d0%%", self._light_level)
+        if bridge_edge("light_up") == 1:
+            self._light_level = min(10, self._light_level + 1)
+            self.light_level_changed.emit(self._light_level)
+            logger.info("Light: %d0%%", self._light_level)
+
+        # Suppress non-safety buttons when locked
+        if self._locked:
+            for name in self._btn_prev:
+                if name not in ("e_stop", "lock"):
+                    cur = bridge_button(name)
+                    self._btn_prev[name] = cur
+            return
+
+        # ── A: Preset cycle ──
+        preset_pressed = bridge_button("preset")
+        if preset_pressed and not self._btn_prev.get("preset", False):
+            self._preset_press_time = now
+            self._preset_long_fired = False
+        elif preset_pressed and self._preset_press_time is not None:
+            if not self._preset_long_fired and (now - self._preset_press_time) >= self._PRESET_LONG_THRESHOLD:
+                self._preset_long_fired = True
+                self.preset_cycle.emit(-1)
+                logger.info("Game controller: Preset cycle BACKWARD (long press)")
+        elif not preset_pressed and self._btn_prev.get("preset", False):
+            if self._preset_press_time is not None and not self._preset_long_fired:
+                elapsed = now - self._preset_press_time
+                if elapsed < self._PRESET_LONG_THRESHOLD:
+                    self.preset_cycle.emit(1)
+                    logger.info("Game controller: Preset cycle FORWARD (short press)")
+            self._preset_press_time = None
+            self._preset_long_fired = False
+        self._btn_prev["preset"] = preset_pressed
+
+        # ── Remaining digital buttons ──
+        if bridge_edge("drop_to_3m") == 1:
+            self.drop_to_3m.emit()
+            logger.info("Game controller: Drop to 3m")
+        if bridge_edge("body_recenter") == 1:
+            self.body_recenter.emit()
+            logger.info("Game controller: Body recenter")
+        if bridge_edge("gimbal_recenter") == 1:
+            self.gimbal_recenter.emit()
+            logger.info("Game controller: Gimbal recenter")
+        if bridge_edge("all_recenter") == 1:
+            self.all_recenter.emit()
+            logger.info("Game controller: All recenter")
+        if bridge_edge("tracking") == 1:
+            self.tracking_toggle.emit()
+            logger.info("Game controller: Tracking toggle")
+        if bridge_edge("record") == 1:
+            self.record_toggle.emit()
+            logger.info("Game controller: Record toggle")
+        if bridge_edge("hud") == 1:
+            self.hud_toggle.emit()
+            logger.info("Game controller: HUD toggle")
+        if bridge_edge("roll_recenter") == 1:
+            self.roll_recenter.emit()
+            logger.info("Game controller: Roll recenter")
+
+        # ── D-pad (hat) for sensitivity ──
+        if self._locked:
+            for key in self._dpad_state:
+                self._dpad_state[key] = False
+            return
+
+        def dpad_edge(name: str, target: tuple) -> int:
+            cur = (hat[0] == target[0] and hat[1] == target[1])
+            prev = self._dpad_state.get(name, False)
+            self._dpad_state[name] = cur
+            if cur and not prev:
+                return 1
+            return 0
+
+        def debounced(name: str) -> bool:
+            last = self._dpad_last_fire.get(name, 0.0)
+            if now - last < self._DPAD_DEBOUNCE:
+                return False
+            self._dpad_last_fire[name] = now
+            return True
+
+        dpad_map = m.get("dpad", {})
+        if dpad_edge("winch_sens_up", dpad_map.get("winch_sens_up", [0, 1])) and debounced("winch_sens_up"):
+            self._winch_sens_level = min(self.SENSITIVITY_MAX, self._winch_sens_level + 1)
+            self.winch_sensitivity_changed.emit(self._winch_sens_level)
+            logger.info("Winch sensitivity: %d", self._winch_sens_level)
+        if dpad_edge("winch_sens_down", dpad_map.get("winch_sens_down", [0, -1])) and debounced("winch_sens_down"):
+            self._winch_sens_level = max(self.SENSITIVITY_MIN, self._winch_sens_level - 1)
+            self.winch_sensitivity_changed.emit(self._winch_sens_level)
+            logger.info("Winch sensitivity: %d", self._winch_sens_level)
+        if dpad_edge("plate_sens_left", dpad_map.get("plate_sens_left", [-1, 0])) and debounced("plate_sens_left"):
+            self._plate_sens_level = max(self.SENSITIVITY_MIN, self._plate_sens_level - 1)
+            self.plate_sensitivity_changed.emit(self._plate_sens_level)
+            logger.info("Plate sensitivity: %d", self._plate_sens_level)
+        if dpad_edge("plate_sens_right", dpad_map.get("plate_sens_right", [1, 0])) and debounced("plate_sens_right"):
+            self._plate_sens_level = min(self.SENSITIVITY_MAX, self._plate_sens_level + 1)
+            self.plate_sensitivity_changed.emit(self._plate_sens_level)
+            logger.info("Plate sensitivity: %d", self._plate_sens_level)
 
     # ── Axes ──
 
@@ -343,36 +715,6 @@ class GameController(QObject):
         gimbal_yaw_angle = 90.0 + self._smooth_gimbal_yaw * self._max_servo_speed * dt
         self.gimbal_yaw_changed.emit(max(0.0, min(180.0, gimbal_yaw_angle)))
 
-        # ── Light brightness (RT) ──
-        # -1 (released) → auto mode (-1.0); pressed → 0..1 brightness
-        light_cfg = _get_axis_cfg(m, "light")
-        light_axis = light_cfg.get("axis", 5)
-        if light_axis >= 0 and light_axis < num_axes:
-            try:
-                raw_light = self._joystick.get_axis(light_axis)
-            except Exception:
-                raw_light = -1.0
-            # raw_light: -1 (released) to +1 (fully pressed)
-            brightness = (raw_light + 1.0) / 2.0  # 0..1
-            if brightness > 0.05:
-                self._light_manual = True
-                self.light_brightness.emit(brightness)
-            elif self._light_manual:
-                self._light_manual = False
-                self.light_brightness.emit(-1.0)  # auto mode
-
-        # ── Descent speed limit (LT) ──
-        # -1 (released) → 1.0 (full speed); +1 (pulled) → 0.0 (slowest)
-        desc_cfg = _get_axis_cfg(m, "descent_limit")
-        desc_axis = desc_cfg.get("axis", 4)
-        if desc_axis >= 0 and desc_axis < num_axes:
-            try:
-                raw_desc = self._joystick.get_axis(desc_axis)
-            except Exception:
-                raw_desc = -1.0
-            limit = 1.0 - (raw_desc + 1.0) / 2.0  # 1.0 released, 0.0 full pull
-            self.descent_speed_limit.emit(limit)
-
     # ── Buttons (edge-triggered) ──
 
     def _poll_buttons(self):
@@ -419,10 +761,21 @@ class GameController(QObject):
                 self.winch_speed_changed.emit(0.0)
                 self.plate_yaw_changed.emit(0.0)
 
+        # ── Light brightness stepping (LT down, RT up) ──
+        # Active regardless of lock state (safety-neutral UI function).
+        if edge("light_down") == 1:
+            self._light_level = max(0, self._light_level - 1)
+            self.light_level_changed.emit(self._light_level)
+            logger.info("Light: %d0%%", self._light_level)
+        if edge("light_up") == 1:
+            self._light_level = min(10, self._light_level + 1)
+            self.light_level_changed.emit(self._light_level)
+            logger.info("Light: %d0%%", self._light_level)
+
         # ── Below this point, locked state suppresses all non-safety buttons ──
         if self._locked:
             for name in self._btn_prev:
-                if name not in ("e_stop", "lock"):
+                if name not in ("e_stop", "lock", "light_down", "light_up"):
                     read_button(name)
                     self._btn_prev[name] = read_button(name)
             return

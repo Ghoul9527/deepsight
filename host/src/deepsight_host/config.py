@@ -52,7 +52,6 @@ class HostConfig:
         self.controller_mappings: dict = ct.get("mappings", {})
         self.controller_max_winch_speed: float = ct.get("max_winch_speed", 100.0)
         self.controller_max_servo_speed: float = ct.get("max_servo_speed", 60.0)
-        self.controller_light_brightness_speed: float = ct.get("light_brightness_speed", 5.0)
         self.controller_sensitivity_step: float = ct.get("sensitivity_step", 0.1)
         self.controller_sensitivity_min: float = ct.get("sensitivity_min", 0.2)
         self.controller_sensitivity_max: float = ct.get("sensitivity_max", 2.0)

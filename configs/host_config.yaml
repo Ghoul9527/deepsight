@@ -29,7 +29,6 @@ controller:
   smoothing_alpha: 0.4
   max_winch_speed: 100
   max_servo_speed: 60
-  light_brightness_speed: 5.0
   sensitivity_step: 0.1
   sensitivity_min: 0.2
   sensitivity_max: 2.0

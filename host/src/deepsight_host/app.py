@@ -107,7 +107,6 @@ class HostApp:
             smoothing_alpha=self.config.controller_smoothing_alpha,
             max_winch_speed=self.config.controller_max_winch_speed,
             max_servo_speed=self.config.controller_max_servo_speed,
-            light_brightness_speed=self.config.controller_light_brightness_speed,
             sensitivity_step=self.config.controller_sensitivity_step,
             sensitivity_min=self.config.controller_sensitivity_min,
             sensitivity_max=self.config.controller_sensitivity_max,
@@ -175,8 +174,7 @@ class HostApp:
             lambda v: self._window.control_panel.tilt_changed.emit(v))
         self._controller.gimbal_yaw_changed.connect(
             lambda v: self._window.control_panel.pan_changed.emit(v))
-        self._controller.light_brightness.connect(self._on_light_brightness)
-        self._controller.descent_speed_limit.connect(self._on_descent_limit)
+        self._controller.light_level_changed.connect(self._on_light_level)
 
         # Safety
         self._controller.e_stop.connect(self._emergency_stop)
@@ -573,18 +571,12 @@ class HostApp:
         self._schedule_async(self._udp.send(
             cmd_servo_set("host", 3, float(value))))
 
-    def _on_light_brightness(self, brightness: float):
-        """Light brightness from RT. -1 = auto mode, 0..1 = manual."""
-        if brightness < 0:
-            logger.info("Light: auto mode")
-        else:
-            logger.info("Light: manual %.0f%%", brightness * 100)
+    def _on_light_level(self, level: int):
+        """Light brightness step from LT/RT triggers. level = 0..10."""
+        brightness = level / 10.0
+        logger.info("Light: %d0%%", level)
         self._schedule_async(self._udp.send(
             Message("host", "cmd.light", {"brightness": brightness})))
-
-    def _on_descent_limit(self, limit: float):
-        """Descent speed limit from LT. 0..1 (1=full speed when released)."""
-        self._window.dashboard.update_value("descent_limit", f"{limit * 100:.0f}%")
 
     def _on_lock_state_changed(self, state: LockState):
         """Start button: lock/unlock system."""
