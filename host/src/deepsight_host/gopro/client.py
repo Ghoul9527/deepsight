@@ -91,7 +91,7 @@ class GoProClient:
     async def open(self):
         headers = {"Host": self._real_host}
         self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(10.0), headers=headers)
+            timeout=httpx.Timeout(8.0), headers=headers)
 
     async def close(self):
         if self._client:
@@ -100,11 +100,7 @@ class GoProClient:
 
     async def is_ready(self) -> bool:
         """Check if GoPro is reachable."""
-        try:
-            r = await self._get("/gopro/camera/state")
-            return r is not None
-        except Exception:
-            return False
+        return await self._get("/gopro/camera/state")
 
     # ── Shutter ──────────────────────────────────────
 

@@ -37,7 +37,7 @@ logger = logging.getLogger("host.control.controller")
 # Chrome has Developer ID signing, bypassing HIDRM entirely.
 _CHROME_WS_BRIDGE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.dirname(os.path.abspath(__file__))))),
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))),
     "scripts", "chrome_ws_bridge.py",
 )
 
@@ -288,13 +288,31 @@ class GameController(QObject):
             return False
 
         try:
+            # .py scripts need explicit interpreter; binaries run directly
+            cmd = [sys.executable, path] if path.endswith(".py") else [path]
             self._bridge_proc = subprocess.Popen(
-                [path],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
             )
+            # Stderr reader daemon thread — prevents pipe buffer fill
+            def _drain_stderr():
+                while self._bridge_proc and self._bridge_proc.poll() is None:
+                    try:
+                        line = self._bridge_proc.stderr.readline()
+                        if line:
+                            logger.debug("Bridge stderr: %s", line.rstrip())
+                        else:
+                            break
+                    except Exception:
+                        break
+
+            stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+            stderr_thread.start()
+            self._stderr_thread = stderr_thread
+
             line = self._bridge_proc.stdout.readline()
             if not line:
                 raise RuntimeError("Bridge produced no output")
@@ -316,23 +334,34 @@ class GameController(QObject):
             return False
 
     def _read_bridge(self):
-        """Read available JSON lines from bridge stdout."""
+        """Read available JSON lines from bridge stdout.
+
+        Uses non-blocking I/O to drain all available lines without
+        blocking the Qt event loop. select() cannot be used here
+        because TextIOWrapper may have internally buffered data that
+        select() won't see on the kernel fd.
+        """
         if not self._bridge_proc or self._bridge_proc.poll() is not None:
             return
 
         try:
-            import select
+            import os, fcntl
+            fd = self._bridge_proc.stdout.fileno()
+            fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
             while True:
-                ready, _, _ = select.select(
-                    [self._bridge_proc.stdout], [], [], 0)
-                if not ready:
-                    break
                 line = self._bridge_proc.stdout.readline()
                 if not line:
                     break
-                state = json.loads(line)
-                with self._bridge_lock:
-                    self._bridge_state = state
+                try:
+                    state = json.loads(line)
+                    with self._bridge_lock:
+                        self._bridge_state = state
+                except json.JSONDecodeError:
+                    pass
+        except BlockingIOError:
+            pass
         except Exception:
             pass
 
@@ -343,10 +372,10 @@ class GameController(QObject):
 
         Backend priority:
           1. pygame (SDL2) — primary on Windows/Linux, may work on macOS.
-          2. GCController bridge (macOS) — native GameController.framework
-             via signed Swift helper. Apple Development signing is sufficient.
-          3. Chrome WebSocket bridge (macOS) — fallback using Chrome's
-             Web Gamepad API. No signing required.
+          2. Chrome WebSocket bridge (macOS) — Chrome's Web Gamepad API,
+             works because Chrome has Developer ID signing + USB entitlement.
+          3. GCController bridge (macOS) — native GameController.framework
+             via signed Swift helper. Only works when launched via open/LaunchServices.
           4. F310 USB bridge — deprecated (macOS 26+ kernel HIDRM block).
         """
         # ── Tier 1: pygame / SDL2 ──
@@ -379,10 +408,11 @@ class GameController(QObject):
         except (ImportError, Exception) as e:
             logger.info("Game controller: pygame unavailable (%s)", e)
 
-        # ── Tier 2: GCController bridge (macOS, GameController.framework) ──
-        # Apple Development signing + NSApplication run loop is sufficient.
+        # ── Tier 2: Chrome WebSocket bridge (macOS only) ──
+        # Chrome has Developer ID signing + com.apple.security.device.usb
+        # entitlement, so Web Gamepad API can read F310 from any context.
         if self._try_start_bridge(
-            _GC_BRIDGE_PATH, "GCController bridge"
+            _CHROME_WS_BRIDGE_PATH, "Chrome WS bridge"
         ):
             self._mapping = _match_mapping(self._bridge_name, self._mappings)
             self._connected = True
@@ -390,10 +420,12 @@ class GameController(QObject):
             self._timer.start(1000 // self._poll_hz)
             return True
 
-        # ── Tier 3: Chrome WebSocket bridge (macOS only) ──
-        # Fallback — uses Chrome's Web Gamepad API, no signing needed.
+        # ── Tier 3: GCController bridge (macOS, GameController.framework) ──
+        # Apple Development signing + NSApplication run loop is sufficient,
+        # but ONLY when launched via open/LaunchServices. From terminal,
+        # GCController delivers all zeros (macOS 26 HIDRM policy).
         if self._try_start_bridge(
-            _CHROME_WS_BRIDGE_PATH, "Chrome WS bridge"
+            _GC_BRIDGE_PATH, "GCController bridge"
         ):
             self._mapping = _match_mapping(self._bridge_name, self._mappings)
             self._connected = True

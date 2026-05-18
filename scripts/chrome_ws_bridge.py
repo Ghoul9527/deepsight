@@ -43,36 +43,34 @@ def get_url():
 
 
 _ws_recv_count = 0
-_ws_recv_logged = False
 
 async def ws_handler(websocket):
     """Receive gamepad state from Chrome and update shared state."""
-    global _ws_recv_count, _ws_recv_logged
-    async for message in websocket:
-        _ws_recv_count += 1
-        if not _ws_recv_logged and _ws_recv_count <= 3:
-            print(f"Chrome bridge: received message #{_ws_recv_count}", file=sys.stderr, flush=True)
-            _ws_recv_logged = True
-        try:
-            data = json.loads(message)
-            # Normalize to bridge format: 6 axes, 13 buttons
-            axes = data.get("axes", [0.0] * 6)
-            if len(axes) < 6:
-                axes = axes + [0.0] * (6 - len(axes))
+    global _ws_recv_count
+    try:
+        async for message in websocket:
+            _ws_recv_count += 1
+            try:
+                data = json.loads(message)
+                # Normalize to bridge format: 6 axes, 13 buttons
+                axes = data.get("axes", [0.0] * 6)
+                if len(axes) < 6:
+                    axes = axes + [0.0] * (6 - len(axes))
 
-            buttons = data.get("buttons", [0] * 13)
-            # Pad buttons if less than 13
-            if len(buttons) < 13:
-                buttons = buttons + [0] * (13 - len(buttons))
+                buttons = data.get("buttons", [0] * 13)
+                if len(buttons) < 13:
+                    buttons = buttons + [0] * (13 - len(buttons))
 
-            hat = data.get("hat", [0, 0])
+                hat = data.get("hat", [0, 0])
 
-            with _gpad_lock:
-                _gpad_state["axes"] = axes[:6]
-                _gpad_state["buttons"] = buttons[:13]
-                _gpad_state["hat"] = hat[:2]
-        except Exception:
-            pass
+                with _gpad_lock:
+                    _gpad_state["axes"] = axes[:6]
+                    _gpad_state["buttons"] = buttons[:13]
+                    _gpad_state["hat"] = hat[:2]
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 async def main_async():

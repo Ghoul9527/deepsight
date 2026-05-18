@@ -116,6 +116,7 @@ class HostApp:
         # GoPro HTTP client (via Pi TCP forward, Host header = GoPro real IP)
         self._gopro = GoProClient(
             self.config.gopro_pi_url, self.config.gopro_real_host)
+        self._gopro_online = False
 
         # Session recording
         self._recorder = TelemetryRecorder()
@@ -288,52 +289,58 @@ class HostApp:
     async def _manage_gopro_lifecycle(self):
         """Detect GoPro, start viewfinder, restart on disconnect.
 
-        Host HTTP → Pi:8080 (socat TCP forward) → GoPro:8080.
-        GoPro UDP → Pi:8554 (SNAT makes GoPro see Pi as client) → Host:8554.
+        Uses the same GoProStatus cache as _poll_gopro_status to avoid
+        duplicate HTTP requests to the slow /gopro/camera/state endpoint.
         """
         stream_started = False
         while self._running:
             try:
-                ready = await self._gopro.is_ready()
-                if ready and not stream_started:
+                online = self._gopro_online
+                if online and not stream_started:
                     logger.info("GoPro detected, starting viewfinder stream...")
                     await self._gopro.start_viewfinder(port=8554)
                     stream_started = True
                     logger.info("GoPro viewfinder stream started (UDP → Pi:8554)")
-                elif not ready and stream_started:
+                elif not online and stream_started:
                     logger.warning("GoPro disconnected, will restart viewfinder on reconnect")
                     stream_started = False
             except Exception as e:
                 logger.warning("GoPro lifecycle error: %s", e)
                 stream_started = False
-            await asyncio.sleep(3)
+            await asyncio.sleep(10)
 
     async def _poll_gopro_status(self):
-        """Poll GoPro camera state through Pi proxy (0.5 Hz).
+        """Poll GoPro camera state through Pi proxy (~0.2 Hz).
 
-        Emits gopro_status_updated with a dict containing:
-          - online: bool
-          - recording: bool
-          - battery_pct: int
-          - sd_remaining_bytes: int
-          - model_name: str
-          - busy: bool
+        Requires 2 consecutive failures before declaring offline to avoid
+        false DEGRADED state from transient timeouts on the slow GoPro API.
         """
+        fail_count = 0
+        # Immediate first poll so UI doesn't show stale default
+        await self._do_gopro_status_poll(fail_count)
         while self._running:
-            try:
-                status = await self._gopro.get_status()
-                data = {
-                    "online": True,
-                    "recording": status.recording,
-                    "battery_pct": int(status.battery_pct),
-                    "sd_remaining_bytes": int(status.storage_gb_free * 1e9),
-                    "model_name": status.model_name,
-                    "busy": status.busy,
-                }
-                self._window.gopro_status_updated.emit(data)
-            except Exception:
+            await asyncio.sleep(5)
+            fail_count = await self._do_gopro_status_poll(fail_count)
+
+    async def _do_gopro_status_poll(self, fail_count: int = 0) -> int:
+        try:
+            status = await self._gopro.get_status()
+            self._gopro_online = True
+            self._window.gopro_status_updated.emit({
+                "online": True,
+                "recording": status.recording,
+                "battery_pct": int(status.battery_pct),
+                "sd_remaining_bytes": int(status.storage_gb_free * 1e9),
+                "model_name": status.model_name,
+                "busy": status.busy,
+            })
+            return 0
+        except Exception:
+            fail_count += 1
+            if fail_count >= 2:
+                self._gopro_online = False
                 self._window.gopro_status_updated.emit({"online": False})
-            await asyncio.sleep(2)
+            return fail_count
 
     def _process_frame(self):
         frame = self._video_source.read()

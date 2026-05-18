@@ -248,10 +248,13 @@ class MainWindow(QMainWindow):
         if not data.get("online"):
             self.node_status.update_node(
                 "gopro", SafetyState.DEGRADED, 0, tr("gopro.offline"))
+            self._video.set_recording(False)
             return
 
         bat = data.get("battery_pct", 0)
-        rec = "●" if data.get("recording") else "○"
+        recording = data.get("recording", False)
+        self._video.set_recording(recording)
+        rec = "●" if recording else "○"
         sd_bytes = data.get("sd_remaining_bytes", 0)
         sd_gb = sd_bytes / 1e9 if sd_bytes > 0 else 0
 

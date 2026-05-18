@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 
+import time
+
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QSizePolicy
 
@@ -23,6 +25,8 @@ class VideoPreviewWidget(QWidget):
         self._frame_w: int = 0
         self._frame_h: int = 0
         self._target_aspect: tuple[int, int] | None = None  # (w, h) for cropping
+        self._recording = False
+        self._rec_start_time: float = 0.0
         self._setup_ui()
 
     def _setup_ui(self):
@@ -46,6 +50,18 @@ class VideoPreviewWidget(QWidget):
         )
         self._overlay_label.setAlignment(Qt.AlignCenter)
         self._overlay_label.setMinimumWidth(160)
+
+        # Recording indicator (top-right)
+        self._rec_label = QLabel(self._label)
+        self._rec_label.setStyleSheet(
+            "background: rgba(0, 0, 0, 180); color: #ff3344; font-size: 15px; "
+            "font-weight: bold; padding: 4px 10px; border-radius: 3px;"
+        )
+        self._rec_label.setAlignment(Qt.AlignCenter)
+        self._rec_label.hide()
+
+        self._rec_timer = QTimer(self)
+        self._rec_timer.timeout.connect(self._update_rec_time)
 
         I18n.instance().language_changed.connect(self._retranslate)
 
@@ -119,7 +135,7 @@ class VideoPreviewWidget(QWidget):
         self._position_overlay()
 
     def _position_overlay(self):
-        """Pin overlay to bottom-left of the parent label."""
+        """Pin overlay to bottom-left, rec indicator to top-right."""
         label = self._label
         overlay = self._overlay_label
         ow = overlay.width()
@@ -127,6 +143,33 @@ class VideoPreviewWidget(QWidget):
         x = 8
         y = label.height() - oh - 8
         overlay.move(x, max(y, 0))
+
+        if self._rec_label.isVisible():
+            rw = self._rec_label.width()
+            self._rec_label.move(label.width() - rw - 8, 8)
+
+    def _update_rec_time(self):
+        elapsed = int(time.time() - self._rec_start_time)
+        m, s = divmod(elapsed, 60)
+        h, m = divmod(m, 60)
+        if h:
+            self._rec_label.setText(f"● REC {h}:{m:02d}:{s:02d}")
+        else:
+            self._rec_label.setText(f"● REC {m:02d}:{s:02d}")
+        self._rec_label.adjustSize()
+        self._position_overlay()
+
+    def set_recording(self, recording: bool):
+        if recording and not self._recording:
+            self._recording = True
+            self._rec_start_time = time.time()
+            self._rec_label.show()
+            self._rec_timer.start(500)
+            self._update_rec_time()
+        elif not recording and self._recording:
+            self._recording = False
+            self._rec_timer.stop()
+            self._rec_label.hide()
 
     def set_overlay(self, text: str):
         self._overlay_label.setText(text)
