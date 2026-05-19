@@ -105,10 +105,15 @@ class GoProClient:
     # ── Shutter ──────────────────────────────────────
 
     async def start_recording(self) -> bool:
-        return await self._get("/gopro/camera/shutter/start?enable=1")
+        # HERO13 shutter: try GET first (per OpenAPI spec), then POST
+        if await self._get("/gopro/camera/shutter/start"):
+            return True
+        return await self._post("/gopro/camera/shutter/start")
 
     async def stop_recording(self) -> bool:
-        return await self._get("/gopro/camera/shutter/start?enable=0")
+        if await self._get("/gopro/camera/shutter/stop"):
+            return True
+        return await self._post("/gopro/camera/shutter/stop")
 
     # ── Stream ───────────────────────────────────────
 
@@ -120,6 +125,18 @@ class GoProClient:
         as the source, so UDP goes to Pi:port.  Pi's socat relays to Host.
         """
         return await self._get(f"/gopro/camera/stream/start?port={port}")
+
+    async def stop_viewfinder(self) -> bool:
+        """Stop the camera's live preview stream."""
+        return await self._get("/gopro/camera/stream/stop")
+
+    async def enable_wired_usb(self, enable: bool = True) -> bool:
+        """Enable/disable wired USB camera control.
+
+        Must be enabled before shutter/recording commands will work.
+        """
+        p = 1 if enable else 0
+        return await self._get(f"/gopro/camera/control/wired_usb?p={p}")
 
     # ── Presets ──────────────────────────────────────
 
@@ -159,18 +176,32 @@ class GoProClient:
 
         Raises ConnectionError when the GoPro is unreachable so callers
         can detect offline state.
+
+        Status IDs (HERO13):
+          2: internal_battery_bars (0-4)
+          6: overheating (1=yes)
+          8: busy (1=yes)
+          10: encoding (1=recording)
+          35: remaining_video_time_seconds
+          54: sd_card_remaining_bytes
+          70: internal_battery_pct (0-100)
         """
         data = await self._get_json("/gopro/camera/state")
         if not data:
             raise ConnectionError("GoPro unreachable")
         status = data.get("status", data)
+        battery_pct = float(_safe_get(status, '70', 0))
+        if battery_pct <= 0:
+            battery_bars = int(_safe_get(status, '2', 0))
+            battery_pct = float(battery_bars) / 4.0 * 100.0
+        sd_bytes = int(_safe_get(status, '54', 0))
         return GoProStatus(
-            recording=bool(_safe_get(status, "encoding_active", 0)),
-            battery_pct=float(_safe_get(status, "internal_battery_percentage", 0)),
-            storage_gb_free=float(_safe_get(status, "sd_card_remaining", 0)) / 1e9,
+            recording=bool(int(_safe_get(status, '10', 0))),
+            battery_pct=battery_pct,
+            storage_gb_free=float(sd_bytes) / 1e9 if sd_bytes > 0 else 0.0,
             model_name=str(data.get("model_name", "")),
-            busy=bool(_safe_get(status, "system_busy", 0)),
-            overheating=bool(_safe_get(status, "overheating", 0)),
+            busy=bool(int(_safe_get(status, '8', 0))),
+            overheating=bool(int(_safe_get(status, '6', 0))),
         )
 
     async def get_camera_info(self) -> dict:
@@ -211,6 +242,76 @@ class GoProClient:
                 await self.set_setting(sid, str(current))
 
         return result
+
+    # ── Media ────────────────────────────────────────
+
+    async def list_media(self, video_only: bool = True) -> list[dict] | None:
+        """List media files on SD card. Returns flat list of {directory,
+        filename, size, created} dicts, or None on failure."""
+        data = await self._get_json("/gopro/media/list")
+        if not data:
+            logger.info("GoPro media list: empty response")
+            return None
+        logger.info("GoPro media list: keys=%s, media_count=%s",
+                    list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                    len(data.get("media", [])) if isinstance(data, dict) else "N/A")
+        files: list[dict] = []
+        for m in data.get("media", []):
+            d = m.get("d", "")
+            for f in m.get("fs", []):
+                fn = f.get("n", "")
+                if video_only and not fn.upper().endswith(".MP4"):
+                    continue
+                files.append({
+                    "directory": d,
+                    "filename": fn,
+                    "size": int(f.get("s", 0)),
+                    "created": int(f.get("cre", 0)),
+                })
+        logger.info("GoPro media list: %d video files found", len(files))
+        return files
+
+    async def get_thumbnail(self, directory: str, filename: str) -> bytes | None:
+        """Fetch JPEG thumbnail for a media file."""
+        path = f"{directory}/{filename}"
+        return await self._get_bytes(
+            f"/gopro/media/thumbnail?path={path}")
+
+    async def download_file(self, directory: str, filename: str,
+                            dest_path: str, progress_cb=None) -> bool:
+        """Stream a media file to disk.  Calls progress_cb(done, total)
+        periodically if provided (on the async thread)."""
+        if not self._client:
+            return False
+        try:
+            url = f"{self._base}/videos/DCIM/{directory}/{filename}"
+            async with self._client.stream("GET", url) as resp:
+                if resp.status_code != 200:
+                    return False
+                total = int(resp.headers.get("content-length", 0))
+                done = 0
+                with open(dest_path, "wb") as f:
+                    async for chunk in resp.aiter_bytes(65536):
+                        f.write(chunk)
+                        done += len(chunk)
+                        if progress_cb and total > 0:
+                            progress_cb(done, total)
+            return True
+        except Exception as e:
+            logger.info("GoPro download error: %s/%s → %s",
+                        directory, filename, e)
+            return False
+
+    async def delete_file(self, directory: str, filename: str) -> bool:
+        """Delete a single media file from the SD card."""
+        path = f"{directory}/{filename}"
+        return await self._get(f"/gopro/media/delete/file?path={path}")
+
+    async def delete_group(self, directory: str, filename: str) -> bool:
+        """Delete a grouped/chaptered media item by its first file."""
+        path = f"{directory}/{filename}"
+        return await self._get(
+            f"/gp/gpControl/command/storage/delete/group?p={path}")
 
     # ── Preset helpers ───────────────────────────────
 
@@ -270,10 +371,37 @@ class GoProClient:
             return False
         try:
             r = await self._client.get(f"{self._base}{path}")
+            if r.status_code != 200:
+                logger.info("GoPro HTTP %d: %s %s  body=%s",
+                           r.status_code, "GET", path, r.text[:200] if r.text else "")
             return r.status_code == 200
         except Exception as e:
-            logger.debug("GoPro HTTP error: %s %s → %s", path, type(e).__name__, e)
+            logger.info("GoPro HTTP error: GET %s → %s", path, e)
             return False
+
+    async def _post(self, path: str) -> bool:
+        if not self._client:
+            return False
+        try:
+            r = await self._client.post(f"{self._base}{path}")
+            if r.status_code != 200:
+                logger.info("GoPro HTTP %d: %s %s  body=%s",
+                           r.status_code, "POST", path, r.text[:200] if r.text else "")
+            return r.status_code == 200
+        except Exception as e:
+            logger.info("GoPro HTTP error: POST %s → %s", path, e)
+            return False
+
+    async def _get_bytes(self, path: str) -> bytes | None:
+        if not self._client:
+            return None
+        try:
+            r = await self._client.get(f"{self._base}{path}")
+            if r.status_code == 200:
+                return r.content
+        except Exception as e:
+            logger.debug("GoPro HTTP bytes error: %s → %s", path, e)
+        return None
 
     async def _get_json(self, path: str) -> dict | None:
         if not self._client:

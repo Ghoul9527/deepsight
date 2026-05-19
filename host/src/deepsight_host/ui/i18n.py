@@ -20,12 +20,16 @@ _translations: dict[str, dict[str, str]] = {
 
     "video.no_video": {"zh": "无视频信号", "en": "No Video"},
     "video.resolution": {"zh": "分辨率", "en": "Resolution"},
+    "video.battery": {"zh": "电量", "en": "Bat"},
+    "video.locked_overlay": {"zh": "已锁定 — 按 Start 解锁", "en": "LOCKED — Press Start to unlock"},
 
     "safety.nominal": {"zh": "正常", "en": "NOMINAL"},
     "safety.degraded": {"zh": "降级", "en": "DEGRADED"},
     "safety.caution": {"zh": "注意", "en": "CAUTION"},
     "safety.safe": {"zh": "安全", "en": "SAFE"},
     "safety.emergency": {"zh": "紧急", "en": "EMERGENCY"},
+    "safety.locked": {"zh": "已锁定", "en": "LOCKED"},
+    "safety.unlocked": {"zh": "已解锁", "en": "UNLOCKED"},
 
     "node.host": {"zh": "主机", "en": "Host"},
     "node.pi": {"zh": "水下网关", "en": "UW Gateway"},
@@ -60,6 +64,8 @@ _translations: dict[str, dict[str, str]] = {
     "tracking.tilt_angle": {"zh": "俯仰角度", "en": "Tilt Angle"},
 
     "tracking.unavailable": {"zh": "追踪不可用 - 模型未加载", "en": "Tracking Unavailable - No Model"},
+    "tracking.target_lost": {"zh": "目标丢失", "en": "TARGET LOST"},
+    "tracking.no_tracking": {"zh": "追踪不可用", "en": "TRACKING UNAVAILABLE"},
     "tracking.active": {"zh": "追踪已激活", "en": "Tracking Active"},
     "tracking.reset_done": {"zh": "追踪器已重置", "en": "Tracker reset"},
 
@@ -87,7 +93,33 @@ _translations: dict[str, dict[str, str]] = {
     "menu.settings_action": {"zh": "系统设置...", "en": "System Settings..."},
     "menu.gopro_control": {"zh": "相机控制...", "en": "Camera Control..."},
     "menu.gopro_presets": {"zh": "相机预设...", "en": "Camera Presets..."},
+    "menu.album": {"zh": "相册(&A)", "en": "&Album"},
+    "menu.album_media": {"zh": "录制素材...", "en": "Recorded Media..."},
     "menu.about": {"zh": "关于(&A)", "en": "&About"},
+
+    # ── Media browser ──
+    "media.title": {"zh": "录制素材", "en": "Recorded Media"},
+    "media.refresh": {"zh": "刷新", "en": "Refresh"},
+    "media.select_all": {"zh": "全选", "en": "Select All"},
+    "media.deselect_all": {"zh": "取消全选", "en": "Deselect All"},
+    "media.download": {"zh": "下载", "en": "Download"},
+    "media.delete": {"zh": "删除", "en": "Delete"},
+    "media.close": {"zh": "关闭", "en": "Close"},
+    "media.filename": {"zh": "文件名", "en": "Filename"},
+    "media.size": {"zh": "大小", "en": "Size"},
+    "media.date": {"zh": "日期", "en": "Date"},
+    "media.loading": {"zh": "正在加载...", "en": "Loading..."},
+    "media.no_files": {"zh": "SD 卡上没有视频文件", "en": "No video files on SD card"},
+    "media.offline": {"zh": "相机离线", "en": "Camera offline"},
+    "media.selected_count": {"zh": "已选 {n} / 共 {total} 个文件", "en": "{n} / {total} selected"},
+    "media.total_size": {"zh": "总计: {size}", "en": "Total: {size}"},
+    "media.downloading": {"zh": "下载中...", "en": "Downloading..."},
+    "media.download_ok": {"zh": "下载完成: {name}", "en": "Downloaded: {name}"},
+    "media.download_fail": {"zh": "下载失败: {name}", "en": "Download failed: {name}"},
+    "media.delete_confirm": {"zh": "确认删除 {n} 个文件？此操作不可撤销。", "en": "Delete {n} files? This cannot be undone."},
+    "media.delete_ok": {"zh": "已删除: {name}", "en": "Deleted: {name}"},
+    "media.delete_fail": {"zh": "删除失败: {name}", "en": "Delete failed: {name}"},
+    "media.deleting": {"zh": "删除中...", "en": "Deleting..."},
 
     # ── Settings dialog ──
     "settings.title": {"zh": "系统设置", "en": "System Settings"},
@@ -312,13 +344,15 @@ class I18n(QObject):
             self._lang = lang
             self.language_changed.emit(lang)
 
-    def tr(self, key: str, *args) -> str:
+    def tr(self, key: str, *args, **kwargs) -> str:
         entry = _translations.get(key, {})
         text = entry.get(self._lang, key)
+        if kwargs:
+            return text.format(**kwargs)
         if args:
             return text % args
         return text
 
 
-def tr(key: str, *args) -> str:
-    return I18n.instance().tr(key, *args)
+def tr(key: str, *args, **kwargs) -> str:
+    return I18n.instance().tr(key, *args, **kwargs)

@@ -86,6 +86,12 @@ class MainWindow(QMainWindow):
         top.addWidget(self._safety_header_label)
         top.addWidget(self._safety_label)
 
+        top.addSpacing(12)
+
+        self._lock_label = QLabel(tr("safety.locked"))
+        self._lock_label.setObjectName("status_red")
+        top.addWidget(self._lock_label)
+
         self._lang_btn = QPushButton(tr("lang.switch"))
         self._lang_btn.setFixedWidth(48)
         self._lang_btn.setFixedHeight(24)
@@ -189,6 +195,13 @@ class MainWindow(QMainWindow):
         self._gopro_action = gopro_action
         self._settings_action = settings_action
 
+        # ── Album menu ──
+        self._album_menu = menu_bar.addMenu(tr("menu.album"))
+        media_action = QAction(tr("menu.album_media"), self)
+        media_action.triggered.connect(self._open_media_browser)
+        self._album_menu.addAction(media_action)
+        self._media_action = media_action
+
         # ── About menu ──
         self._about_menu = menu_bar.addMenu(tr("menu.about"))
 
@@ -227,6 +240,26 @@ class MainWindow(QMainWindow):
     def _on_presets_dlg_closed(self):
         self._presets_dlg = None
 
+    def setup_media_services(self, gopro_client, schedule_async, download_dir: str):
+        self._gopro_client = gopro_client
+        self._schedule_async = schedule_async
+        self._download_dir = download_dir
+
+    def _open_media_browser(self):
+        from deepsight_host.ui.media_browser import MediaBrowserDialog
+        if not hasattr(self, '_media_dlg') or self._media_dlg is None:
+            if not hasattr(self, '_gopro_client'):
+                return
+            self._media_dlg = MediaBrowserDialog(
+                self._gopro_client, self._schedule_async, self._download_dir, self)
+            self._media_dlg.finished.connect(self._on_media_dlg_closed)
+        self._media_dlg.show()
+        self._media_dlg.raise_()
+        self._media_dlg.activateWindow()
+
+    def _on_media_dlg_closed(self):
+        self._media_dlg = None
+
     @property
     def gopro_dialog(self):
         """Return the current GoPro control dialog if open, else None."""
@@ -247,16 +280,20 @@ class MainWindow(QMainWindow):
         """Update node status widget with GoPro state."""
         if not data.get("online"):
             self.node_status.update_node(
-                "gopro", SafetyState.DEGRADED, 0, tr("gopro.offline"))
+                "gopro", None, 0, tr("gopro.offline"))
             self._video.set_recording(False)
+            self._video.set_battery(0)
+            self._control_panel.set_gopro_status(False, 0, 0)
             return
 
         bat = data.get("battery_pct", 0)
         recording = data.get("recording", False)
         self._video.set_recording(recording)
+        self._video.set_battery(bat)
         rec = "●" if recording else "○"
         sd_bytes = data.get("sd_remaining_bytes", 0)
         sd_gb = sd_bytes / 1e9 if sd_bytes > 0 else 0
+        self._control_panel.set_gopro_status(recording, bat, sd_gb)
 
         if sd_gb >= 1:
             sd_str = f"{sd_gb:.0f}GB"
@@ -320,11 +357,14 @@ class MainWindow(QMainWindow):
         self._status_bar.showMessage(tr("app.ready"))
         self._safety_header_label.setText(tr("app.safety") + ":")
         self._safety_label.setText(tr(f"safety.{self._current_safety}"))
+        self._lock_label.setText(tr(f"safety.{'locked' if self._current_safety == 'locked' else 'unlocked'}"))
         self._settings_menu.setTitle(tr("menu.settings"))
+        self._album_menu.setTitle(tr("menu.album"))
         self._about_menu.setTitle(tr("menu.about"))
         self._settings_action.setText(tr("menu.settings_action"))
         self._presets_action.setText(tr("menu.gopro_presets"))
         self._gopro_action.setText(tr("menu.gopro_control"))
+        self._media_action.setText(tr("menu.album_media"))
 
     def changeEvent(self, event):
         if event.type() == QEvent.WindowStateChange:
@@ -379,9 +419,9 @@ class MainWindow(QMainWindow):
         self._current_safety = state
         self._current_safety_color = color
         i18n_key = f"safety.{state}"
-        label = tr(i18n_key) if i18n_key in ("safety.nominal", "safety.degraded",
-                                              "safety.caution", "safety.safe",
-                                              "safety.emergency") else state.upper()
+        known = ("safety.nominal", "safety.degraded", "safety.caution",
+                 "safety.safe", "safety.emergency", "safety.locked", "safety.unlocked")
+        label = tr(i18n_key) if i18n_key in known else state.upper()
         self._safety_label.setText(label)
 
         obj_name = {
@@ -392,6 +432,18 @@ class MainWindow(QMainWindow):
         self._safety_label.setObjectName(obj_name)
         self._safety_label.style().unpolish(self._safety_label)
         self._safety_label.style().polish(self._safety_label)
+
+    def set_lock_state(self, locked: bool):
+        """Update the lock state indicator in the top bar and video overlay."""
+        if locked:
+            self._lock_label.setText(tr("safety.locked"))
+            self._lock_label.setObjectName("status_red")
+        else:
+            self._lock_label.setText(tr("safety.unlocked"))
+            self._lock_label.setObjectName("status_green")
+        self._lock_label.style().unpolish(self._lock_label)
+        self._lock_label.style().polish(self._lock_label)
+        self._video.set_lock_overlay(locked)
 
     def set_status_message(self, msg: str):
         self._status_bar.showMessage(msg)

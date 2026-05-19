@@ -147,6 +147,8 @@ safety:
   tracking_lost_hold_s: 0.5
   tracking_lost_neutral_s: 2.0
   servo_neutral_angle: 90.0
+download:
+  media_dir: "~/DeepSight_Media"
 logging:
   level: DEBUG
   dir: logs/host/

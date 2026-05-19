@@ -97,4 +97,9 @@ class HostConfig:
         self.log_dir: str = lg.get("dir", "logs/host/")
         self.telemetry_record: bool = lg.get("telemetry_record", False)
 
+        dl = data.get("download", {})
+        self.media_download_dir: str = dl.get(
+            "media_dir", str(Path.home() / "DeepSight_Media"))
+
         os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(self.media_download_dir, exist_ok=True)

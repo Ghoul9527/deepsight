@@ -11,6 +11,7 @@ import time
 
 import numpy as np
 from PySide6.QtCore import QTimer
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from deepsight_host.config import HostConfig
@@ -30,6 +31,7 @@ from deepsight_host.logging.structured_logger import setup_logging
 from deepsight_host.logging.telemetry_recorder import TelemetryRecorder
 from deepsight_host.diagnostics.startup_check import StartupCheck
 from deepsight_host.gopro import GoProClient
+from deepsight_host.ui.i18n import tr
 
 from deepsight_shared.protocol import (
     make_heartbeat, cmd_servo_set, sys_safety, sys_ping,
@@ -50,6 +52,10 @@ class HostApp:
 
         # Qt
         self._qt_app = QApplication(sys.argv)
+        app_font = QFont()
+        app_font.setFamilies(["Heiti SC", "STHeiti", "PingFang SC",
+                              "Hiragino Sans GB", ".AppleSystemUIFont"])
+        self._qt_app.setFont(app_font)
         self._window = MainWindow()
         self._window.set_config(self.config)
 
@@ -117,6 +123,8 @@ class HostApp:
         self._gopro = GoProClient(
             self.config.gopro_pi_url, self.config.gopro_real_host)
         self._gopro_online = False
+        self._window.setup_media_services(
+            self._gopro, self._schedule_async, self.config.media_download_dir)
 
         # Session recording
         self._recorder = TelemetryRecorder()
@@ -198,6 +206,8 @@ class HostApp:
 
         # GoPro commands → direct HTTP through Pi proxy
         self._window.gopro_command.connect(self._on_gopro_command)
+        self._window.control_panel.record_toggle.connect(
+            lambda: self._window.gopro_command.emit("record_toggle", "", ""))
         self._window.gopro_probe.connect(self._on_gopro_probe)
         self._window.gopro_get_presets.connect(self._on_get_presets)
         self._window.gopro_load_preset.connect(self._on_load_preset)
@@ -228,6 +238,7 @@ class HostApp:
 
         self._window.show()
         self._controller.start()
+        self._window.set_lock_state(True)  # initial lock overlay
         self._recorder.start()
         self._update_tracking_status()
 
@@ -287,26 +298,32 @@ class HostApp:
                 pass
 
     async def _manage_gopro_lifecycle(self):
-        """Detect GoPro, start viewfinder, restart on disconnect.
-
-        Uses the same GoProStatus cache as _poll_gopro_status to avoid
-        duplicate HTTP requests to the slow /gopro/camera/state endpoint.
-        """
+        """Detect GoPro, ensure video preset, start viewfinder, restart on disconnect."""
         stream_started = False
+        video_mode_set = False
         while self._running:
             try:
                 online = self._gopro_online
-                if online and not stream_started:
-                    logger.info("GoPro detected, starting viewfinder stream...")
-                    await self._gopro.start_viewfinder(port=8554)
-                    stream_started = True
-                    logger.info("GoPro viewfinder stream started (UDP → Pi:8554)")
-                elif not online and stream_started:
-                    logger.warning("GoPro disconnected, will restart viewfinder on reconnect")
+                if online:
+                    if not video_mode_set:
+                        await self._gopro.enable_wired_usb(True)
+                        ok = await self._gopro.load_preset_group(1000)  # video
+                        logger.info("GoPro USB control + video preset: %s", "OK" if ok else "FAIL")
+                        video_mode_set = True
+                    if not stream_started:
+                        logger.info("GoPro detected, starting viewfinder stream...")
+                        await self._gopro.start_viewfinder(port=8554)
+                        stream_started = True
+                        logger.info("GoPro viewfinder stream started (UDP → Pi:8554)")
+                elif not online:
+                    if stream_started:
+                        logger.warning("GoPro disconnected, will restart on reconnect")
                     stream_started = False
+                    video_mode_set = False
             except Exception as e:
                 logger.warning("GoPro lifecycle error: %s", e)
                 stream_started = False
+                video_mode_set = False
             await asyncio.sleep(10)
 
     async def _poll_gopro_status(self):
@@ -445,13 +462,12 @@ class HostApp:
             cv2.line(frame, (cx, cy - 20), (cx, cy + 20), (100, 100, 100), 1)
 
         if result is None or not result.visible:
-            if cv2:
-                if result is not None and result.lost:
-                    cv2.putText(frame, "TARGET LOST", (10, 60),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                else:
-                    cv2.putText(frame, "TRACKING UNAVAILABLE", (10, 60),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (100, 100, 100), 2)
+            if result is not None and result.lost:
+                _draw_text_cjk(frame, tr("tracking.target_lost"),
+                               (10, 60), (0, 0, 255), 30)
+            else:
+                _draw_text_cjk(frame, tr("tracking.no_tracking"),
+                               (10, 60), (100, 100, 100), 30)
             return
 
         # Bounding box
@@ -538,6 +554,8 @@ class HostApp:
             self._schedule_async(self._gopro.load_preset_group(gid))
         elif action == "get_settings":
             self._schedule_async(self._fetch_gopro_settings())
+        elif action == "record_toggle":
+            self._schedule_async(self._toggle_recording())
         elif action == "record":
             if value == "1":
                 self._schedule_async(self._gopro.start_recording())
@@ -590,8 +608,7 @@ class HostApp:
         unlocked = state == LockState.UNLOCKED
         status = "UNLOCKED" if unlocked else "LOCKED"
         self._window.set_status_message(f"System: {status}")
-        color = "green" if unlocked else "red"
-        self._window.set_safety_state("locked" if not unlocked else "nominal", color)
+        self._window.set_lock_state(not unlocked)
 
     def _on_drop_to_3m(self):
         """LB: initiate drop to 3m depth."""
@@ -634,11 +651,16 @@ class HostApp:
         try:
             status = await self._gopro.get_status()
             if status.recording:
-                await self._gopro.stop_recording()
-                logger.info("Recording stopped")
+                ok = await self._gopro.stop_recording()
+                logger.info("Recording stop: %s", "OK" if ok else "FAIL")
+                # HERO13 may stop the preview stream during recording;
+                # restart it after stopping.
+                await asyncio.sleep(1.0)
+                await self._gopro.start_viewfinder(port=8554)
             else:
-                await self._gopro.start_recording()
-                logger.info("Recording started")
+                await self._gopro.enable_wired_usb(True)
+                ok = await self._gopro.start_recording()
+                logger.info("Recording start: %s", "OK" if ok else "FAIL")
         except Exception as e:
             logger.warning("Record toggle failed: %s", e)
 
@@ -761,6 +783,32 @@ class HostApp:
         self._window.set_status_message(f"Startup: {summary}")
         if not ok:
             logger.warning("Startup check FAILED — %s", summary)
+
+
+def _draw_text_cjk(frame: np.ndarray, text: str, pos: tuple[int, int],
+                   color_bgr: tuple[int, int, int], font_size: int = 30):
+    """Draw text on numpy frame using Pillow for CJK support."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        cv2 = _cv2()
+        if cv2:
+            cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX,
+                        font_size / 30.0, color_bgr, 2)
+        return
+
+    h, w = frame.shape[:2]
+    rgb = frame[..., ::-1].copy()
+    pil_img = Image.fromarray(rgb)
+    draw = ImageDraw.Draw(pil_img)
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/STHeiti Medium.ttc", font_size)
+    except OSError:
+        font = ImageFont.load_default()
+
+    pil_color = (color_bgr[2], color_bgr[1], color_bgr[0])
+    draw.text(pos, text, font=font, fill=pil_color)
+    frame[:] = np.array(pil_img)[..., ::-1]
 
 
 def _cv2():
