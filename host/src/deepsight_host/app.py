@@ -257,8 +257,11 @@ class HostApp:
         return self._qt_app.exec()
 
     def _update_tracking_status(self):
-        is_mock = getattr(self._tracker, 'is_mock', True)
         mode = self.config.tracking_mode.upper()
+        if mode == "OFF":
+            self._window.tracking_view.set_status("OFF - Tracking Disabled")
+            return
+        is_mock = getattr(self._tracker, 'is_mock', True)
         status = f"{mode} - Model Unavailable" if is_mock else f"{mode} - Model Active"
         self._window.tracking_view.set_status(status)
 
@@ -379,8 +382,12 @@ class HostApp:
         t0 = time.monotonic()
 
         # Tracking
-        result = self._tracker.process_frame(frame)
-        track_latency = (time.monotonic() - t0) * 1000.0
+        if self._tracker is not None:
+            result = self._tracker.process_frame(frame)
+            track_latency = (time.monotonic() - t0) * 1000.0
+        else:
+            result = None
+            track_latency = 0.0
 
         # Draw overlay on frame
         self._draw_overlay(frame, result)
@@ -756,9 +763,13 @@ class HostApp:
 
     def _switch_tracking_mode(self, mode: str):
         logger.info("Switching tracking mode: %s", mode)
-        self._tracker = get_tracker(mode,
-                                     confidence_threshold=self.config.confidence_threshold,
-                                     iou_threshold=self.config.iou_threshold)
+        if mode == "off":
+            self._tracker = None
+        else:
+            self._tracker = get_tracker(mode,
+                                         confidence_threshold=self.config.confidence_threshold,
+                                         iou_threshold=self.config.iou_threshold,
+                                         model_path=self.config.model_path)
         self.config.tracking_mode = mode
         self._update_tracking_status()
 
