@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """Chrome WebSocket Gamepad Bridge for DeepSight Host.
 
-Starts a WebSocket server and generates an HTML page that reads gamepad state
-via the Web Gamepad API (navigator.getGamepads) and streams it over WebSocket.
-
-Usage:
-  python scripts/chrome_ws_bridge.py
+Starts an HTTP + WebSocket server that serves the gamepad tester page
+and receives gamepad state via Web Gamepad API over WebSocket.
 
 Chrome must be used — it has the signing/entitlements that macOS 26 requires
 for USB HID gamepad access.
@@ -35,14 +32,25 @@ _gpad_state: dict = {"axes": [0.0] * 6, "buttons": [0] * 13, "hat": [0, 0]}
 _gpad_lock = threading.Lock()
 _server_ready = threading.Event()
 _running = True
-
-
-def get_url():
-    """Return the file:// URL for the gamepad tester page."""
-    return f"file://{HTML_PATH}"
-
-
 _ws_recv_count = 0
+
+# Read the HTML file once at startup
+with open(HTML_PATH, "r", encoding="utf-8") as f:
+    _HTML_CONTENT = f.read().encode("utf-8")
+
+
+async def process_request(connection, request):
+    """Serve the HTML page via HTTP, upgrade /ws to WebSocket."""
+    if request.path == "/ws":
+        # Let websockets handle the WebSocket upgrade
+        return None
+    # Serve the HTML page for everything else
+    response = connection.respond(200, _HTML_CONTENT.decode("utf-8"))
+    del response.headers["Content-Type"]
+    response.headers["Content-Type"] = "text/html; charset=utf-8"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
+
 
 async def ws_handler(websocket):
     """Receive gamepad state from Chrome and update shared state."""
@@ -52,17 +60,13 @@ async def ws_handler(websocket):
             _ws_recv_count += 1
             try:
                 data = json.loads(message)
-                # Normalize to bridge format: 6 axes, 13 buttons
                 axes = data.get("axes", [0.0] * 6)
                 if len(axes) < 6:
                     axes = axes + [0.0] * (6 - len(axes))
-
                 buttons = data.get("buttons", [0] * 13)
                 if len(buttons) < 13:
                     buttons = buttons + [0] * (13 - len(buttons))
-
                 hat = data.get("hat", [0, 0])
-
                 with _gpad_lock:
                     _gpad_state["axes"] = axes[:6]
                     _gpad_state["buttons"] = buttons[:13]
@@ -75,18 +79,19 @@ async def ws_handler(websocket):
 
 async def main_async():
     global _running
-    url = get_url()
 
     server = await serve(
-        ws_handler, "127.0.0.1", PORT, ping_interval=None
+        ws_handler,
+        "127.0.0.1",
+        PORT,
+        ping_interval=None,
+        process_request=process_request,
     )
     _server_ready.set()
 
-    print(f"Chrome bridge: WebSocket server on ws://127.0.0.1:{PORT}", file=sys.stderr)
-    print(f"Chrome bridge: open {url} in Chrome", file=sys.stderr)
+    print(f"Chrome bridge: open http://localhost:{PORT} in Chrome", file=sys.stderr)
     sys.stderr.flush()
 
-    # Output loop — writes latest gamepad state to stdout at ~250Hz
     while _running:
         await asyncio.sleep(0.004)
         with _gpad_lock:

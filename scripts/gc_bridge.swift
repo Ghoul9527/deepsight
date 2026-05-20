@@ -77,7 +77,7 @@ final class BridgeDelegate: NSObject, NSApplicationDelegate {
     var connectObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        // Visible window — GCController delivery requires foreground app
+        // Visible window — GCController may need a window to receive events
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
             styleMask: [.titled, .closable],
@@ -85,8 +85,8 @@ final class BridgeDelegate: NSObject, NSApplicationDelegate {
             defer: true
         )
         win.title = "DeepSight GC Bridge"
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        win.level = .floating
+        win.orderFrontRegardless()
 
         // Check for already-connected controller
         let controllers = GCController.controllers()
@@ -130,7 +130,7 @@ final class BridgeDelegate: NSObject, NSApplicationDelegate {
 
 // ── Main ──────────────────────────────────────────────────────────────
 let app = NSApplication.shared
-app.setActivationPolicy(.regular)
+app.setActivationPolicy(.accessory)
 let delegate = BridgeDelegate()
 app.delegate = delegate
 app.run()

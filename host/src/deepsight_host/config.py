@@ -61,21 +61,21 @@ class HostConfig:
                     "name_patterns": [],
                     "axes": {
                         "winch": {"axis": 1, "invert": False},
-                        "rudder": {"axis": 0, "invert": False},
-                        "camera_pitch": {"axis": 3, "invert": True},
-                        "camera_yaw": {"axis": 2, "invert": False},
+                        "plate_yaw": {"axis": 0, "invert": False},
+                        "gimbal_pitch": {"axis": 3, "invert": True},
+                        "gimbal_yaw": {"axis": 2, "invert": False},
                         "light": {"axis": 5},
-                        "descent_limit": {"axis": 4},
                     },
                     "buttons": {
-                        "drop_3m": 4, "body_reset": 8, "camera_center": 9,
-                        "full_reset": 10, "auto_track": 5, "record": 1,
-                        "hud": 2, "roll_reset": 3, "preset": 0,
+                        "drop_to_3m": 4, "body_recenter": 8, "gimbal_recenter": 9,
+                        "all_recenter": 10, "tracking": 5, "record": 1,
+                        "hud": 2, "roll_recenter": 3, "preset": 0,
                         "e_stop": 6, "lock": 7,
+                        "light_down": 11, "light_up": 12,
                     },
                     "dpad": {
                         "winch_sens_up": [0, 1], "winch_sens_down": [0, -1],
-                        "rudder_sens_left": [-1, 0], "rudder_sens_right": [1, 0],
+                        "plate_sens_left": [-1, 0], "plate_sens_right": [1, 0],
                     },
                 }
             }

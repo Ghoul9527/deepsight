@@ -609,7 +609,7 @@ function applyState(data) {
 
 // ── WebSocket ──────────────────────────────────────────
 function connectWS() {
-  ws = new WebSocket('ws://localhost:9877');
+  ws = new WebSocket('ws://localhost:9877/ws');
   ws.onopen = () => {
     document.getElementById('sb-conn').innerHTML = '● Connected (bridge)';
     document.getElementById('sb-conn').className = 'ok';

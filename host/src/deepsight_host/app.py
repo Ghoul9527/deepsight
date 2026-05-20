@@ -27,8 +27,8 @@ from deepsight_host.control.framer import Framer
 from deepsight_host.control.servo_mapper import ServoMapper
 from deepsight_host.control.pid import PIDController
 from deepsight_host.control.controller import GameController, LockState
-from deepsight_host.logging.structured_logger import setup_logging
-from deepsight_host.logging.telemetry_recorder import TelemetryRecorder
+from deepsight_host.log_config.structured_logger import setup_logging
+from deepsight_host.log_config.telemetry_recorder import TelemetryRecorder
 from deepsight_host.diagnostics.startup_check import StartupCheck
 from deepsight_host.gopro import GoProClient
 from deepsight_host.ui.i18n import tr

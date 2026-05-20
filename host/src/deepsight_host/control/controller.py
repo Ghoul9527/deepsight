@@ -371,11 +371,11 @@ class GameController(QObject):
         """Connect to a game controller, trying backends in order.
 
         Backend priority:
-          1. pygame (SDL2) — primary on Windows/Linux, may work on macOS.
-          2. Chrome WebSocket bridge (macOS) — Chrome's Web Gamepad API,
-             works because Chrome has Developer ID signing + USB entitlement.
-          3. GCController bridge (macOS) — native GameController.framework
-             via signed Swift helper. Only works when launched via open/LaunchServices.
+          1. pygame (SDL2) — primary on Windows/Linux.
+          2. Chrome WebSocket bridge (macOS) — Chrome's Web Gamepad API.
+             Needs Chrome page open with --disable-features=RestrictGamepadAccess.
+          3. GCController bridge (macOS) — native GameController.framework,
+             may connect but deliver zeros on macOS 26+.
           4. F310 USB bridge — deprecated (macOS 26+ kernel HIDRM block).
         """
         # ── Tier 1: pygame / SDL2 ──
@@ -409,8 +409,6 @@ class GameController(QObject):
             logger.info("Game controller: pygame unavailable (%s)", e)
 
         # ── Tier 2: Chrome WebSocket bridge (macOS only) ──
-        # Chrome has Developer ID signing + com.apple.security.device.usb
-        # entitlement, so Web Gamepad API can read F310 from any context.
         if self._try_start_bridge(
             _CHROME_WS_BRIDGE_PATH, "Chrome WS bridge"
         ):
@@ -421,9 +419,6 @@ class GameController(QObject):
             return True
 
         # ── Tier 3: GCController bridge (macOS, GameController.framework) ──
-        # Apple Development signing + NSApplication run loop is sufficient,
-        # but ONLY when launched via open/LaunchServices. From terminal,
-        # GCController delivers all zeros (macOS 26 HIDRM policy).
         if self._try_start_bridge(
             _GC_BRIDGE_PATH, "GCController bridge"
         ):
@@ -597,7 +592,7 @@ class GameController(QObject):
         # Suppress non-safety buttons when locked
         if self._locked:
             for name in self._btn_prev:
-                if name not in ("e_stop", "lock"):
+                if name not in ("e_stop", "lock", "light_down", "light_up"):
                     cur = bridge_button(name)
                     self._btn_prev[name] = cur
             return
