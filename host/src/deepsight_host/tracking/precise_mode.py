@@ -13,6 +13,8 @@ import time
 
 import numpy as np
 
+import cv2
+
 from deepsight_host.tracking.base import TrackingEngine, TrackingResult
 
 logger = logging.getLogger("host.tracking.precise")
@@ -97,7 +99,8 @@ class PreciseModeTracker(TrackingEngine):
         # Resolution scaling
         if max(w, h) > self._inference_size:
             scale = self._inference_size / max(w, h)
-            input_frame = frame[::int(1/scale), ::int(1/scale)]
+            new_w, new_h = int(w * scale), int(h * scale)
+            input_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
         else:
             scale = 1.0
             input_frame = frame
