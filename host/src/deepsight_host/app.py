@@ -97,6 +97,7 @@ class HostApp:
             self.config.tracking_mode,
             confidence_threshold=self.config.confidence_threshold,
             iou_threshold=self.config.iou_threshold,
+            model_path=self.config.model_path,
         )
 
         # Control pipeline

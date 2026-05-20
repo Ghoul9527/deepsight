@@ -30,10 +30,14 @@ Thumbs.db
 .env
 .env.local
 
-# Models (large files)
+# Training artifacts
+runs/
+
+# Model files (weights only, training data in ~/Movies/deepsight_yolo_training/)
 *.pt
 *.onnx
 *.engine
+!models/freediver_s.pt
 
 # Recordings
 *.mp4

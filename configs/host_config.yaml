@@ -20,7 +20,7 @@ mock:
   fps: 30
 tracking:
   mode: fast
-  model_path: ''
+  model_path: 'models/freediver_s.pt'  # yolo8s v2 — curated footage, mAP50=0.92
   confidence_threshold: 0.5
   iou_threshold: 0.45
 controller:

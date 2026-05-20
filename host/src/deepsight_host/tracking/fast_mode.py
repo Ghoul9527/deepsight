@@ -23,10 +23,12 @@ class FastModeTracker(TrackingEngine):
     def __init__(self, confidence_threshold: float = 0.5,
                  iou_threshold: float = 0.45,
                  model_name: str = "yolov8n.pt",
+                 model_path: str = "",
                  inference_size: int = 640):
         self._conf = confidence_threshold
         self._iou = iou_threshold
         self._model_name = model_name
+        self._model_path = model_path
         self._model = None
         self._mock = True
         self._frame_count = 0
@@ -52,10 +54,11 @@ class FastModeTracker(TrackingEngine):
             else:
                 self._device = "cpu"
 
-            self._model = YOLO(self._model_name)
+            model = self._model_path or self._model_name
+            self._model = YOLO(model)
             self._mock = False
             logger.info("FastMode: loaded %s (device=%s, imgsz=%d)",
-                         self._model_name, self._device, self._inference_size)
+                         model, self._device, self._inference_size)
         except Exception as e:
             logger.warning("FastMode: YOLO unavailable (%s), using synthetic", e)
             self._device = "cpu"
