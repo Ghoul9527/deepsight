@@ -7,13 +7,22 @@ import config
 class SerialLink:
     def __init__(self):
         self._buffer = ""
-        self._mock_mode = config.MOCK_ENABLED
+        self._uart = None
+        self._mock_mode = config.SERIAL_MOCK
         self._mock_send_queue = []
 
     def init(self):
         if not self._mock_mode:
-            # Future: initialize UART
-            pass
+            from machine import UART, Pin
+            self._uart = UART(
+                0,
+                baudrate=config.SERIAL_BAUD,
+                tx=Pin(16),
+                rx=Pin(17),
+                bits=8,
+                parity=None,
+                stop=1,
+            )
 
     def read_line(self) -> str | None:
         if self._mock_mode:
@@ -23,16 +32,29 @@ class SerialLink:
             if select.select([sys.stdin], [], [], 0)[0]:
                 return sys.stdin.readline().strip()
             return None
-        # Future: read from UART
+
+        if self._uart is None:
+            return None
+        while self._uart.any():
+            b = self._uart.read(1)
+            if b is None:
+                break
+            ch = chr(b[0]) if isinstance(b, bytes) else chr(b)
+            if ch == "\n":
+                line = self._buffer
+                self._buffer = ""
+                return line.strip()
+            self._buffer += ch
         return None
 
     def write(self, data: str):
         if self._mock_mode:
             self._mock_send_queue.append(data)
             print(f"[MOCK→Pi] {data}")
-        else:
-            # Future: write to UART
-            pass
+        elif self._uart is not None:
+            self._uart.write(data + "\n")
 
     def available(self) -> bool:
-        return len(self._mock_send_queue) > 0
+        if self._mock_mode:
+            return len(self._mock_send_queue) > 0
+        return self._uart is not None and self._uart.any() > 0

@@ -60,15 +60,25 @@ class NodeStatusIndicator(QFrame):
         if not self._ever_connected:
             self._state_label.setText(tr("node.state_offline"))
         elif self._state is None:
-            self._state_label.setText(tr("node.state_online"))
+            self._state_label.setText(tr("node.state_offline"))
+        else:
+            state_map = {
+                SafetyState.NOMINAL: tr("node.state_healthy"),
+                SafetyState.DEGRADED: tr("node.state_degraded"),
+                SafetyState.CAUTION: tr("node.state_degraded"),
+                SafetyState.SAFE: tr("node.state_lost"),
+                SafetyState.EMERGENCY: tr("node.state_lost"),
+            }
+            text = state_map.get(self._state, "???")
+            self._state_label.setText(text)
 
     def update_state(self, state: SafetyState | None, heartbeat_ago: float = 0.0,
                      info: str = ""):
         self._ever_connected = True
         if state is None:
-            # Non-heartbeat device (e.g. GoPro) — show info text
-            self._state_label.setText(tr("node.state_online"))
-            self._state_label.setObjectName("status_green")
+            # Disconnected / no data (e.g. GoPro unplugged)
+            self._state_label.setText(tr("node.state_offline"))
+            self._state_label.setObjectName("status_yellow")
             self._state_label.style().unpolish(self._state_label)
             self._state_label.style().polish(self._state_label)
             self._hb_label.setText(info)

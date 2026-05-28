@@ -12,6 +12,7 @@ CONTROL_LOOP_DT = 1.0 / CONTROL_LOOP_HZ
 
 # ── Serial ────────────────────────────────────────────────
 SERIAL_BAUD = 115200
+SERIAL_MOCK = False
 
 # ── Mock mode ─────────────────────────────────────────────
 MOCK_ENABLED = True

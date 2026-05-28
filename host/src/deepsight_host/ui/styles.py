@@ -8,8 +8,6 @@ QMainWindow {
 QWidget {
     background-color: #1a1a2e;
     color: #e0e0e0;
-    font-family: "Consolas", "Monaco", "Courier New", monospace;
-    font-size: 13px;
 }
 
 QLabel {

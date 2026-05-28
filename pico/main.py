@@ -6,13 +6,14 @@ Runs on Raspberry Pi Pico with MicroPython or CPython (mock mode).
 import sys
 import time
 
+import config
 from serial_link import SerialLink
 from control_loop import ControlLoop
 
 
 def main():
     print("=== DeepSight Pico Controller ===")
-    print("Mock mode: enabled")
+    print(f"Mock mode: {'enabled' if config.MOCK_ENABLED else 'disabled'}")
     print("Control loop: 50 Hz")
     print("")
 

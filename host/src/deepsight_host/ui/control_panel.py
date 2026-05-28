@@ -28,6 +28,7 @@ class ControlPanelWidget(QWidget):
     tilt_changed = Signal(float)
     winch_stop = Signal()
     e_stop = Signal()
+    record_toggle = Signal()  # emitted when user clicks the REC button
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -114,6 +115,7 @@ class ControlPanelWidget(QWidget):
         gopro_layout = QHBoxLayout(gopro_group)
         self._rec_btn = QPushButton("● REC")
         self._rec_btn.setCheckable(True)
+        self._rec_btn.clicked.connect(self.record_toggle.emit)
         gopro_layout.addWidget(self._rec_btn)
         self._gopro_status = QLabel("Ready")
         self._gopro_status.setObjectName("heading")
@@ -161,7 +163,20 @@ class ControlPanelWidget(QWidget):
         self._tilt_slider.blockSignals(False)
 
     def set_gopro_status(self, recording: bool, battery: float, storage: float):
+        self._rec_btn.blockSignals(True)
+        self._rec_btn.setChecked(recording)
+        self._rec_btn.blockSignals(False)
         if recording:
+            self._rec_btn.setText("■ STOP")
+            self._rec_btn.setStyleSheet(
+                "QPushButton { background-color: #4a2020; border-color: #884444; color: #ff6666; }"
+            )
+        else:
+            self._rec_btn.setText("● REC")
+            self._rec_btn.setStyleSheet("")
+        if battery <= 0:
+            self._gopro_status.setText(tr("gopro.offline"))
+        elif recording:
             self._gopro_status.setText(
                 f"REC | Batt:{battery:.0f}% | Free:{storage:.0f}GB"
             )
