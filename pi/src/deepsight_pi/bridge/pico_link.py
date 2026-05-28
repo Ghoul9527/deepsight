@@ -43,8 +43,18 @@ class PicoLink:
         logger.info("PicoLink: opening %s @ %d baud", self._port, self._baud)
         try:
             self._reader, self._writer = await open_serial_connection(
-                url=self._port, baudrate=self._baud,
+                url=self._port,
+                baudrate=self._baud,
+                bytesize=8,
+                parity="N",
+                stopbits=1,
             )
+            # Flush any boot noise from Pico UART
+            await asyncio.sleep(0.3)
+            try:
+                self._reader._transport.serial.reset_input_buffer()
+            except Exception:
+                pass
             self._recv_task = asyncio.create_task(self._recv_loop())
             logger.info("PicoLink: connected")
         except Exception as e:
@@ -81,7 +91,7 @@ class PicoLink:
             try:
                 msg = Message.from_json(line.decode("utf-8").strip())
                 await self._recv_queue.put(msg)
-            except (json.JSONDecodeError, ValueError) as e:
+            except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as e:
                 logger.debug("PicoLink parse error: %s", e)
 
     async def stop(self):

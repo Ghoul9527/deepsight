@@ -13,7 +13,7 @@ def make_telemetry(msg_type: str, payload: dict) -> str:
         "version": "1.0",
         "payload": payload,
     }
-    return json.dumps(msg) + "\n"
+    return json.dumps(msg)
 
 
 def tel_imu(yaw: float, pitch: float, roll: float,
