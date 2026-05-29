@@ -140,8 +140,8 @@ class HostApp:
         # Servo command rate-limiting — suppress noise and cap send frequency
         self._last_sent_angles: dict[int, float] = {}
         self._last_sent_time: dict[int, float] = {}
-        self._servo_deadband = 0.5      # degrees — suppress sub-degree jitter
-        self._servo_min_interval = 0.1  # seconds — cap at 10 Hz per servo
+        self._servo_deadband = 0.3      # degrees — suppress sub-degree jitter
+        self._servo_min_interval = 0.02  # seconds — cap at 50 Hz per servo
 
         # Winch command rate-limiting
         self._last_winch_speed: float | None = None
