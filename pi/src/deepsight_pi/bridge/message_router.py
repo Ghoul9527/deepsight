@@ -76,6 +76,7 @@ class MessageRouter:
                 except asyncio.QueueEmpty:
                     break
             if pico_alive:
+                logger.debug("Forwarding Pico heartbeat to Host")
                 await self._host.send(make_heartbeat("pico"))
 
             # ── Drain STM32 recv queue ──

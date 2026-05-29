@@ -76,7 +76,12 @@ class PicoLink:
 
     async def _recv_loop(self):
         """Read JSONL lines from UART and push parsed Messages to the queue."""
+        logger.info("PicoLink recv_loop started")
+        loop_count = 0
         while self._running and self._reader is not None:
+            loop_count += 1
+            if loop_count <= 3 or loop_count % 50 == 0:
+                logger.debug("PicoLink recv_loop iter %d", loop_count)
             try:
                 line = await self._reader.readline()
             except Exception as e:
@@ -88,10 +93,12 @@ class PicoLink:
                 await asyncio.sleep(0.01)
                 continue
 
+            logger.debug("PicoLink raw line: %r", line[:120])
             try:
                 msg = Message.from_json(line.decode("utf-8").strip())
                 await self._recv_queue.put(msg)
-            except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as e:
+                logger.debug("PicoLink recv: %s", msg.type)
+            except (json.JSONDecodeError, ValueError, UnicodeDecodeError, KeyError) as e:
                 logger.debug("PicoLink parse error: %s", e)
 
     async def stop(self):

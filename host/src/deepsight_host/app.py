@@ -34,7 +34,7 @@ from deepsight_host.gopro import GoProClient
 from deepsight_host.ui.i18n import tr
 
 from deepsight_shared.protocol import (
-    make_heartbeat, cmd_servo_set, sys_safety, sys_ping,
+    make_heartbeat, cmd_servo_set, cmd_winch_set, sys_safety, sys_ping,
     cmd_startup_check, Message,
 )
 
@@ -137,6 +137,16 @@ class HostApp:
         # Preset switch guard — cancel stale restarts on rapid switching
         self._restart_gen = 0
 
+        # Servo command rate-limiting — suppress noise and cap send frequency
+        self._last_sent_angles: dict[int, float] = {}
+        self._last_sent_time: dict[int, float] = {}
+        self._servo_deadband = 0.5      # degrees — suppress sub-degree jitter
+        self._servo_min_interval = 0.1  # seconds — cap at 10 Hz per servo
+
+        # Winch command rate-limiting
+        self._last_winch_speed: float | None = None
+        self._last_winch_direction: str | None = None
+
         # Performance tracking
         self._frame_count = 0
         self._fps_ema = 0.0
@@ -179,12 +189,13 @@ class HostApp:
 
         # Analog axes
         self._controller.winch_speed_changed.connect(self._on_winch_speed)
-        self._controller.plate_yaw_changed.connect(self._on_plate_yaw)
+        self._controller.plate_yaw_changed.connect(self._on_fin_steer)
         self._controller.gimbal_pitch_changed.connect(
             lambda v: self._window.control_panel.tilt_changed.emit(v))
         self._controller.gimbal_yaw_changed.connect(
             lambda v: self._window.control_panel.pan_changed.emit(v))
         self._controller.light_level_changed.connect(self._on_light_level)
+        self._controller.roll_trim_changed.connect(self._on_roll_trim)
 
         # Safety
         self._controller.e_stop.connect(self._emergency_stop)
@@ -203,7 +214,6 @@ class HostApp:
 
         # Sensitivity
         self._controller.winch_sensitivity_changed.connect(self._on_winch_sens_changed)
-        self._controller.plate_sensitivity_changed.connect(self._on_plate_sens_changed)
 
         # GoPro commands → direct HTTP through Pi proxy
         self._window.gopro_command.connect(self._on_gopro_command)
@@ -331,16 +341,16 @@ class HostApp:
             await asyncio.sleep(10)
 
     async def _poll_gopro_status(self):
-        """Poll GoPro camera state through Pi proxy (~0.2 Hz).
+        """Poll GoPro camera state through Pi proxy (~0.5 Hz).
 
-        Requires 2 consecutive failures before declaring offline to avoid
-        false DEGRADED state from transient timeouts on the slow GoPro API.
+        Single failure declares offline — the socat relay fails fast when
+        GoPro is disconnected (no route to host), so transient timeouts are rare.
         """
         fail_count = 0
         # Immediate first poll so UI doesn't show stale default
         await self._do_gopro_status_poll(fail_count)
         while self._running:
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
             fail_count = await self._do_gopro_status_poll(fail_count)
 
     async def _do_gopro_status_poll(self, fail_count: int = 0) -> int:
@@ -370,7 +380,7 @@ class HostApp:
             if (isinstance(self._video_source, StreamReceiver)
                     and self._video_source.stale()):
                 frame = self._no_signal_source.read()
-                self._window.video_preview.update_frame(frame, 0.0)
+                self._window.video_preview.update_frame(frame, 0.0, no_signal=True)
             # If stream is not stale, keep showing the last good frame (skip)
             return
 
@@ -398,8 +408,8 @@ class HostApp:
         #   Host→screen: frame_age_ms (ffmpeg decode + Qt display gap)
         ee_latency = 210.0 + self._pi_stream_latency_ms + self._video_source.frame_age_ms()
 
-        # Control: compute servo angles
-        if result is not None:
+        # Control: compute servo angles (only when target is actually visible)
+        if result is not None and result.visible and not result.lost:
             angles = self._framer.process(result)
             # Record tracking result
             self._recorder.record_tracking(
@@ -455,9 +465,9 @@ class HostApp:
         # Update servo sliders
         self._window.control_panel.set_servo_angles(angles.pan, angles.tilt)
 
-        # Send servo commands over UDP
-        self._schedule_async(self._udp.send(cmd_servo_set("host", 0, angles.pan)))
-        self._schedule_async(self._udp.send(cmd_servo_set("host", 1, angles.tilt)))
+        # Send servo commands over UDP (rate-limited)
+        self._send_servo(0, angles.pan)
+        self._send_servo(1, angles.tilt)
 
     def _draw_overlay(self, frame: np.ndarray, result):
         h, w = frame.shape[:2]
@@ -593,16 +603,33 @@ class HostApp:
 
     def _on_winch_speed(self, speed: float):
         """Winch speed from left stick Y. Positive = reel in (ascend)."""
+        direction = "up" if speed > 0 else "down" if speed < 0 else "stop"
+        abs_speed = abs(float(speed))
+        # Rate-limit: only send when speed or direction changes meaningfully
+        if (self._last_winch_speed is not None
+                and abs(abs_speed - self._last_winch_speed) < 1.0
+                and direction == self._last_winch_direction):
+            return
+        self._last_winch_speed = abs_speed
+        self._last_winch_direction = direction
         self._schedule_async(self._udp.send(
-            cmd_servo_set("host", 2, float(speed))))
-        # Update plate sign based on winch direction
-        direction = self._controller.winch_direction
-        self._controller.set_plate_sign(direction)
+            cmd_winch_set("host", abs_speed, direction)))
+        direction_sign = self._controller.winch_direction
+        self._controller.set_plate_sign(direction_sign)
 
-    def _on_plate_yaw(self, value: float):
-        """Plate yaw from left stick X. Sign already applied by controller."""
-        self._schedule_async(self._udp.send(
-            cmd_servo_set("host", 3, float(value))))
+    def _on_fin_steer(self, value: float):
+        """Fin steering from left stick X. Differential mixing for left/right fins.
+        value = -1..1 (left..right). Center = 90 deg.
+        """
+        max_deflection = 45.0  # max angle from center
+        left_angle = 90.0 - value * max_deflection   # stick right → left fin forward (>90)
+        right_angle = 90.0 + value * max_deflection  # stick right → right fin back (<90)
+        self._send_servo(3, float(left_angle))
+        self._send_servo(4, float(right_angle))
+
+    def _on_roll_trim(self, angle: float):
+        """Roll gimbal trim from D-pad L/R. angle = 0..180 deg."""
+        self._send_servo(2, float(angle))
 
     def _on_light_level(self, level: int):
         """Light brightness step from LT/RT triggers. level = 0..10."""
@@ -628,8 +655,8 @@ class HostApp:
     def _on_body_recenter(self):
         """L3: recenter body (winch to 0, plate to 0)."""
         logger.info("Body recenter")
-        self._schedule_async(self._udp.send(cmd_servo_set("host", 2, 0.0)))
-        self._schedule_async(self._udp.send(cmd_servo_set("host", 3, 0.0)))
+        self._send_servo(2, 0.0)
+        self._send_servo(3, 0.0)
 
     def _on_gimbal_recenter(self):
         """R3: recenter gimbal pitch/yaw."""
@@ -684,6 +711,7 @@ class HostApp:
         logger.info("Roll recenter")
         self._schedule_async(self._udp.send(
             Message("host", "cmd.roll_reset", {})))
+        self._send_servo(2, 90.0)
 
     def _on_preset_cycle(self, direction: int):
         """A: cycle camera preset (+1 forward, -1 backward)."""
@@ -753,6 +781,30 @@ class HostApp:
                     break
 
     def _send_servo(self, servo_id: int, angle: float):
+        """Send servo angle command with rate-limiting.
+
+        Two-stage throttle:
+        1. Deadband: suppress changes smaller than _servo_deadband degrees.
+        2. Min interval: cap each servo at ~10 Hz to prevent UART flood on Pico.
+
+        The EMA smoothing in GameController produces unique values every poll
+        cycle (convergence), so deadband alone is insufficient.
+        """
+        now = time.monotonic()
+        last = self._last_sent_angles.get(servo_id)
+        last_t = self._last_sent_time.get(servo_id, 0.0)
+
+        # Deadband check
+        if last is not None and abs(angle - last) <= self._servo_deadband:
+            return
+
+        # Min interval check — skip if sent too recently (unless change > 5 deg)
+        if last_t and (now - last_t) < self._servo_min_interval:
+            if abs(angle - (last or 90.0)) < 5.0:
+                return  # small change, not urgent
+
+        self._last_sent_angles[servo_id] = angle
+        self._last_sent_time[servo_id] = now
         self._schedule_async(self._udp.send(cmd_servo_set("host", servo_id, angle)))
 
     def _emergency_stop(self):

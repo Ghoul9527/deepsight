@@ -28,7 +28,7 @@ controller:
   dead_zone: 0.08
   smoothing_alpha: 0.4
   max_winch_speed: 100
-  max_servo_speed: 60
+  max_servo_speed: 15
   sensitivity_step: 0.1
   sensitivity_min: 0.2
   sensitivity_max: 2.0
@@ -116,8 +116,8 @@ controller:
       axes:
         winch: {axis: 1, invert: false}
         plate_yaw: {axis: 0, invert: false}
-        gimbal_pitch: {axis: 3, invert: true}
-        gimbal_yaw: {axis: 2, invert: false}
+        gimbal_pitch: {axis: 3, invert: false}
+        gimbal_yaw: {axis: 2, invert: true}
       buttons:
         drop_to_3m: 4
         body_recenter: 8
@@ -141,7 +141,7 @@ control:
   pid_p: 0.8
   pid_i: 0.05
   pid_d: 0.2
-  max_servo_speed: 60.0
+  max_servo_speed: 15.0
   dead_zone: 0.02
 safety:
   tracking_lost_hold_s: 0.5

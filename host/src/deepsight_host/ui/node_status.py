@@ -121,7 +121,7 @@ class NodeStatusWidget(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(4)
-        for node_key in ["gopro", "pi", "pico", "stm32"]:
+        for node_key in ["pi", "gopro", "pico", "stm32"]:
             indicator = NodeStatusIndicator(node_key)
             self._indicators[node_key] = indicator
             row.addWidget(indicator)

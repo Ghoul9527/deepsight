@@ -1,4 +1,4 @@
-"""Pico main — entry point for the control firmware.
+"""Pico main - entry point for the control firmware.
 
 Runs on Raspberry Pi Pico with MicroPython or CPython (mock mode).
 """

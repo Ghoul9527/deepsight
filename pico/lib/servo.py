@@ -148,6 +148,7 @@ class _PCA9685:
 # ── Factory ──────────────────────────────────────────────
 
 def create_servo_driver() -> ServoDriver:
-    if config.MOCK_ENABLED:
+    servo_mock = getattr(config, 'SERVO_MOCK', config.MOCK_ENABLED)
+    if servo_mock:
         return MockServoDriver()
     return PCA9685ServoDriver()

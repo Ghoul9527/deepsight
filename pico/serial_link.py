@@ -17,16 +17,25 @@ class SerialLink:
             self._uart = UART(
                 0,
                 baudrate=config.SERIAL_BAUD,
-                tx=Pin(16),
-                rx=Pin(17),
+                tx=Pin(config.SERIAL_TX_PIN),
+                rx=Pin(config.SERIAL_RX_PIN),
                 bits=8,
                 parity=None,
                 stop=1,
             )
 
+    def flush_input(self):
+        """Discard pending RX data. Limit to HW FIFO size to avoid blocking."""
+        if self._mock_mode or self._uart is None:
+            return
+        # RP2040 UART FIFO is 256 bytes, read at most 4 x 64 = 256 bytes
+        for _ in range(4):
+            if not self._uart.any():
+                break
+            self._uart.read(64)
+
     def read_line(self) -> str | None:
         if self._mock_mode:
-            # In mock mode, read from stdin (for testing)
             import sys
             import select
             if select.select([sys.stdin], [], [], 0)[0]:
@@ -35,8 +44,11 @@ class SerialLink:
 
         if self._uart is None:
             return None
-        while self._uart.any():
+        # Limit: read at most 128 bytes per call to avoid hogging
+        max_read = 128
+        while max_read > 0 and self._uart.any():
             b = self._uart.read(1)
+            max_read -= 1
             if b is None:
                 break
             ch = chr(b[0]) if isinstance(b, bytes) else chr(b)
@@ -44,13 +56,15 @@ class SerialLink:
                 line = self._buffer
                 self._buffer = ""
                 return line.strip()
+            if len(self._buffer) >= 1024:
+                self._buffer = ""  # overflow protection
             self._buffer += ch
         return None
 
     def write(self, data: str):
         if self._mock_mode:
             self._mock_send_queue.append(data)
-            print(f"[MOCK→Pi] {data}")
+            print(f"[MOCK->Pi] {data}")
         elif self._uart is not None:
             self._uart.write(data + "\n")
 

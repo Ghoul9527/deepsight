@@ -51,7 +51,7 @@ class HostConfig:
         self.controller_smoothing_alpha: float = ct.get("smoothing_alpha", 0.4)
         self.controller_mappings: dict = ct.get("mappings", {})
         self.controller_max_winch_speed: float = ct.get("max_winch_speed", 100.0)
-        self.controller_max_servo_speed: float = ct.get("max_servo_speed", 60.0)
+        self.controller_max_servo_speed: float = ct.get("max_servo_speed", 15.0)
         self.controller_sensitivity_step: float = ct.get("sensitivity_step", 0.1)
         self.controller_sensitivity_min: float = ct.get("sensitivity_min", 0.2)
         self.controller_sensitivity_max: float = ct.get("sensitivity_max", 2.0)
@@ -84,7 +84,7 @@ class HostConfig:
         self.pid_p: float = c.get("pid_p", 0.8)
         self.pid_i: float = c.get("pid_i", 0.05)
         self.pid_d: float = c.get("pid_d", 0.2)
-        self.max_servo_speed: float = c.get("max_servo_speed", 60.0)
+        self.max_servo_speed: float = c.get("max_servo_speed", 15.0)
         self.dead_zone: float = c.get("dead_zone", 0.02)
 
         s = data.get("safety", {})

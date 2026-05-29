@@ -112,7 +112,7 @@ class VideoPreviewWidget(QWidget):
     def set_target_aspect(self, ratio: tuple[int, int] | None):
         self._target_aspect = ratio
 
-    def update_frame(self, frame: np.ndarray, fps: float = 0.0, latency_ms: float = 0.0):
+    def update_frame(self, frame: np.ndarray, fps: float = 0.0, latency_ms: float = 0.0, *, no_signal: bool = False):
         if frame is None:
             return
         self._frame_h, self._frame_w = frame.shape[:2]
@@ -125,14 +125,18 @@ class VideoPreviewWidget(QWidget):
         self._text_label.hide()
         self._scale_and_display()
 
-        fps_str = f"{fps:.1f}" if fps > 0 else "--"
-        lat_str = f"  {latency_ms:.0f}ms" if latency_ms > 0 else ""
-        h, w = frame.shape[:2]
-        self._overlay_label.setText(
-            f"  {w}x{h}  |  {fps_str} FPS{lat_str}  "
-        )
-        self._overlay_label.adjustSize()
-        self._position_overlay()
+        if no_signal:
+            self._overlay_label.hide()
+        else:
+            fps_str = f"{fps:.1f}" if fps > 0 else "--"
+            lat_str = f"  {latency_ms:.0f}ms" if latency_ms > 0 else ""
+            h, w = frame.shape[:2]
+            self._overlay_label.setText(
+                f"  {w}x{h}  |  {fps_str} FPS{lat_str}  "
+            )
+            self._overlay_label.adjustSize()
+            self._position_overlay()
+            self._overlay_label.show()
 
     @staticmethod
     def _crop_to_aspect(frame: np.ndarray, target: tuple[int, int]) -> np.ndarray:
@@ -267,3 +271,4 @@ class VideoPreviewWidget(QWidget):
         self._text_label.adjustSize()
         self._text_label.show()
         self._center_text_label()
+        self._overlay_label.hide()

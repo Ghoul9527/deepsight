@@ -91,7 +91,7 @@ class GoProClient:
     async def open(self):
         headers = {"Host": self._real_host}
         self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(8.0), headers=headers)
+            timeout=httpx.Timeout(3.0), headers=headers)
 
     async def close(self):
         if self._client:

@@ -66,7 +66,7 @@ _FALLBACK_MAPPING: dict[str, Any] = {
         "winch": {"axis": 1, "invert": False},
         "plate_yaw": {"axis": 0, "invert": False},
         "gimbal_pitch": {"axis": 3, "invert": True},
-        "gimbal_yaw": {"axis": 2, "invert": False},
+        "gimbal_yaw": {"axis": 2, "invert": True},
     },
     "buttons": {
         "drop_to_3m": 4, "body_recenter": 8, "gimbal_recenter": 9,
@@ -139,8 +139,8 @@ class GameController(QObject):
     preset_cycle = Signal(int)                 # A: +1 short press, -1 long press
 
     # ── Sensitivity adjustment (D-pad steps, integer levels) ──
-    winch_sensitivity_changed = Signal(int)    # ±1 step
-    plate_sensitivity_changed = Signal(int)    # ±1 step
+    winch_sensitivity_changed = Signal(int)    # D-pad U/D: ±1 step
+    roll_trim_changed = Signal(float)          # D-pad L/R: roll servo angle (deg)
 
     # ── Sensitivity level limits ──
     SENSITIVITY_MIN = 1
@@ -152,7 +152,7 @@ class GameController(QObject):
         dead_zone: float = 0.08,
         smoothing_alpha: float = 0.4,
         max_winch_speed: float = 100.0,
-        max_servo_speed: float = 60.0,
+        max_servo_speed: float = 15.0,  # gimbal range in degrees from center
         sensitivity_step: float = 0.1,
         sensitivity_min: float = 0.2,
         sensitivity_max: float = 2.0,
@@ -228,7 +228,7 @@ class GameController(QObject):
 
         # Sensitivity levels (1-10)
         self._winch_sens_level = 5
-        self._plate_sens_level = 5
+        self._roll_angle = 90.0  # roll gimbal trim, adjusted by D-pad L/R
 
     # ── Public properties ──
 
@@ -548,14 +548,14 @@ class GameController(QObject):
         if self._locked:
             raw_gp = 0.0
         self._smooth_gimbal_pitch += (raw_gp - self._smooth_gimbal_pitch) * self._smoothing_alpha
-        gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._max_servo_speed * dt
+        gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._max_servo_speed
         self.gimbal_pitch_changed.emit(max(0.0, min(180.0, gimbal_pitch_angle)))
 
         raw_gy = bridge_axis("gimbal_yaw", 2)
         if self._locked:
             raw_gy = 0.0
         self._smooth_gimbal_yaw += (raw_gy - self._smooth_gimbal_yaw) * self._smoothing_alpha
-        gimbal_yaw_angle = 90.0 + self._smooth_gimbal_yaw * self._max_servo_speed * dt
+        gimbal_yaw_angle = 90.0 + self._smooth_gimbal_yaw * self._max_servo_speed
         self.gimbal_yaw_changed.emit(max(0.0, min(180.0, gimbal_yaw_angle)))
 
         # ── Buttons (edge-triggered) ──
@@ -674,13 +674,13 @@ class GameController(QObject):
             self.winch_sensitivity_changed.emit(self._winch_sens_level)
             logger.info("Winch sensitivity: %d", self._winch_sens_level)
         if dpad_edge("plate_sens_left", dpad_map.get("plate_sens_left", [-1, 0])) and debounced("plate_sens_left"):
-            self._plate_sens_level = max(self.SENSITIVITY_MIN, self._plate_sens_level - 1)
-            self.plate_sensitivity_changed.emit(self._plate_sens_level)
-            logger.info("Plate sensitivity: %d", self._plate_sens_level)
+            self._roll_angle = max(0.0, self._roll_angle - 5.0)
+            self.roll_trim_changed.emit(self._roll_angle)
+            logger.info("Roll trim: %.0f deg", self._roll_angle)
         if dpad_edge("plate_sens_right", dpad_map.get("plate_sens_right", [1, 0])) and debounced("plate_sens_right"):
-            self._plate_sens_level = min(self.SENSITIVITY_MAX, self._plate_sens_level + 1)
-            self.plate_sensitivity_changed.emit(self._plate_sens_level)
-            logger.info("Plate sensitivity: %d", self._plate_sens_level)
+            self._roll_angle = min(180.0, self._roll_angle + 5.0)
+            self.roll_trim_changed.emit(self._roll_angle)
+            logger.info("Roll trim: %.0f deg", self._roll_angle)
 
     # ── Axes ──
 
@@ -731,7 +731,7 @@ class GameController(QObject):
         if self._locked:
             raw_gp = 0.0
         self._smooth_gimbal_pitch += (raw_gp - self._smooth_gimbal_pitch) * self._smoothing_alpha
-        gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._max_servo_speed * dt
+        gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._max_servo_speed
         self.gimbal_pitch_changed.emit(max(0.0, min(180.0, gimbal_pitch_angle)))
 
         # ── Gimbal yaw (right stick X) ──
@@ -739,7 +739,7 @@ class GameController(QObject):
         if self._locked:
             raw_gy = 0.0
         self._smooth_gimbal_yaw += (raw_gy - self._smooth_gimbal_yaw) * self._smoothing_alpha
-        gimbal_yaw_angle = 90.0 + self._smooth_gimbal_yaw * self._max_servo_speed * dt
+        gimbal_yaw_angle = 90.0 + self._smooth_gimbal_yaw * self._max_servo_speed
         self.gimbal_yaw_changed.emit(max(0.0, min(180.0, gimbal_yaw_angle)))
 
     # ── Buttons (edge-triggered) ──
@@ -917,13 +917,13 @@ class GameController(QObject):
             self.winch_sensitivity_changed.emit(self._winch_sens_level)
             logger.info("Winch sensitivity: %d", self._winch_sens_level)
         if dpad_edge("plate_sens_left", m.get("dpad", {}).get("plate_sens_left", [-1, 0])) and debounced("plate_sens_left"):
-            self._plate_sens_level = max(self.SENSITIVITY_MIN, self._plate_sens_level - 1)
-            self.plate_sensitivity_changed.emit(self._plate_sens_level)
-            logger.info("Plate sensitivity: %d", self._plate_sens_level)
+            self._roll_angle = max(0.0, self._roll_angle - 5.0)
+            self.roll_trim_changed.emit(self._roll_angle)
+            logger.info("Roll trim: %.0f deg", self._roll_angle)
         if dpad_edge("plate_sens_right", m.get("dpad", {}).get("plate_sens_right", [1, 0])) and debounced("plate_sens_right"):
-            self._plate_sens_level = min(self.SENSITIVITY_MAX, self._plate_sens_level + 1)
-            self.plate_sensitivity_changed.emit(self._plate_sens_level)
-            logger.info("Plate sensitivity: %d", self._plate_sens_level)
+            self._roll_angle = min(180.0, self._roll_angle + 5.0)
+            self.roll_trim_changed.emit(self._roll_angle)
+            logger.info("Roll trim: %.0f deg", self._roll_angle)
 
 
 def discover_controller() -> str | None:

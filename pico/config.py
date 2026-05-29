@@ -6,24 +6,28 @@ In CPython mock mode: values can be overridden by loading pico_config.yaml.
 
 import os as _os
 
-# ── Control loop ──────────────────────────────────────────
+# -- Control loop ------------------------------------------
 CONTROL_LOOP_HZ = 50
 CONTROL_LOOP_DT = 1.0 / CONTROL_LOOP_HZ
 
-# ── Serial ────────────────────────────────────────────────
+# -- Serial ------------------------------------------------
 SERIAL_BAUD = 115200
 SERIAL_MOCK = False
+SERIAL_TX_PIN = 0   # UART0 TX -> Pi RX (GPIO15)
+SERIAL_RX_PIN = 1   # UART0 RX <- Pi TX (GPIO14)
+ENABLE_UART_READ = True  # Host-side deadband + per-tick drain prevents RX flood
 
-# ── Mock mode ─────────────────────────────────────────────
+# -- Mock mode ---------------------------------------------
 MOCK_ENABLED = True
 
-# ── Safety ────────────────────────────────────────────────
+# -- Safety ------------------------------------------------
 NO_COMMAND_TIMEOUT_S = 1.0
 DEFAULT_SERVO_ANGLE = 90.0
 MAX_SERVO_ANGLE = 180.0
 MIN_SERVO_ANGLE = 0.0
 
-# ── Servo (PCA9685, I2C) ─────────────────────────────────
+# -- Servo (PCA9685, I2C) ---------------------------------
+SERVO_MOCK = False  # use real PCA9685 driver
 SERVO_I2C_ADDR = 0x40
 SERVO_I2C_SCL_PIN = 5
 SERVO_I2C_SDA_PIN = 4
@@ -33,7 +37,7 @@ SERVO_PWM_FREQ = 50
 SERVO_PULSE_MIN_US = 500
 SERVO_PULSE_MAX_US = 2500
 
-# ── IMU (MPU6050, I2C) ───────────────────────────────────
+# -- IMU (MPU6050, I2C) -----------------------------------
 IMU_I2C_ADDR = 0x68
 IMU_I2C_SCL_PIN = 5
 IMU_I2C_SDA_PIN = 4
@@ -41,24 +45,24 @@ IMU_I2C_FREQ = 400000
 IMU_GYRO_SCALE = 250   # deg/s
 IMU_ACCEL_SCALE = 2    # g
 
-# ── Pressure / Depth (MS5837-30BA, I2C) ──────────────────
+# -- Pressure / Depth (MS5837-30BA, I2C) ------------------
 PRESSURE_I2C_ADDR = 0x76
 PRESSURE_I2C_SCL_PIN = 5
 PRESSURE_I2C_SDA_PIN = 4
 PRESSURE_I2C_FREQ = 400000
 
-# ── Environment (BME280, I2C) ────────────────────────────
+# -- Environment (BME280, I2C) ----------------------------
 BME280_I2C_ADDR = 0x77
 BME280_I2C_SCL_PIN = 5
 BME280_I2C_SDA_PIN = 4
 BME280_I2C_FREQ = 400000
 
-# ── Lighting (PWM) ───────────────────────────────────────
+# -- Lighting (PWM) ---------------------------------------
 LIGHTING_CHANNELS = 4
 LIGHTING_PWM_FREQ = 1000
 LIGHTING_PWM_PINS = [0, 1, 2, 3]
 
-# ── Leak sensor (ADC) ────────────────────────────────────
+# -- Leak sensor (ADC) ------------------------------------
 LEAK_CHANNELS = 4
 LEAK_ADC_PINS = [26, 27, 28, 29]
 LEAK_WET_THRESHOLD = 1.5  # volts, below = wet
