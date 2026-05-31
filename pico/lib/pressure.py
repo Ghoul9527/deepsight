@@ -101,6 +101,8 @@ class MS5837Driver(PressureDriver):
 
     def read(self) -> tuple:
         """Return (depth_m, pressure_mbar, temperature_c)."""
+        if not self.initialized:
+            return (0.0, 1013.25, 25.0)
         # Read raw pressure (D1)
         raw_p = self._read_adc(0)  # D1 = pressure
         if raw_p is None:

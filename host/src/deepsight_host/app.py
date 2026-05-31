@@ -113,7 +113,8 @@ class HostApp:
             dead_zone=self.config.controller_dead_zone,
             smoothing_alpha=self.config.controller_smoothing_alpha,
             max_winch_speed=self.config.controller_max_winch_speed,
-            max_servo_speed=self.config.controller_max_servo_speed,
+            gimbal_yaw_max_angle=self.config.gimbal_yaw_max_angle,
+            gimbal_pitch_max_angle=self.config.gimbal_pitch_max_angle,
             sensitivity_step=self.config.controller_sensitivity_step,
             sensitivity_min=self.config.controller_sensitivity_min,
             sensitivity_max=self.config.controller_sensitivity_max,
@@ -140,8 +141,9 @@ class HostApp:
         # Servo command rate-limiting — suppress noise and cap send frequency
         self._last_sent_angles: dict[int, float] = {}
         self._last_sent_time: dict[int, float] = {}
-        self._servo_deadband = 0.3      # degrees — suppress sub-degree jitter
-        self._servo_min_interval = 0.02  # seconds — cap at 50 Hz per servo
+        self._servo_deadband = 0.3       # degrees — suppress sub-degree jitter
+        self._servo_min_interval = 0.025  # seconds — cap at 40 Hz per servo
+        self._servo_seq = 0              # sequence number for timecode tracing
 
         # Winch command rate-limiting
         self._last_winch_speed: float | None = None
@@ -175,10 +177,7 @@ class HostApp:
         self._registry_timer.timeout.connect(self._check_nodes)
         self._telemetry_timer.timeout.connect(self._process_telemetry)
 
-        cp = self._window.control_panel
-        cp.pan_changed.connect(lambda v: self._send_servo(0, float(v)))
-        cp.tilt_changed.connect(lambda v: self._send_servo(1, float(v)))
-        cp.e_stop.connect(self._emergency_stop)
+        self._window.e_stop.connect(self._emergency_stop)
 
         self._window.tracking_view.mode_changed.connect(self._switch_tracking_mode)
         self._window.tracking_view.reset_button.clicked.connect(self._reset_tracker)
@@ -191,11 +190,14 @@ class HostApp:
         self._controller.winch_speed_changed.connect(self._on_winch_speed)
         self._controller.plate_yaw_changed.connect(self._on_fin_steer)
         self._controller.gimbal_pitch_changed.connect(
-            lambda v: self._window.control_panel.tilt_changed.emit(v))
+            lambda v: (self._send_servo(1, float(v)), self._window.gimbal_deflection.set_tilt(v)))
         self._controller.gimbal_yaw_changed.connect(
-            lambda v: self._window.control_panel.pan_changed.emit(v))
+            lambda v: (self._send_servo(0, float(v)), self._window.gimbal_deflection.set_pan(v)))
         self._controller.light_level_changed.connect(self._on_light_level)
         self._controller.roll_trim_changed.connect(self._on_roll_trim)
+
+        # Gamepad connection status
+        self._controller.connection_changed.connect(self._window.set_gamepad_connected)
 
         # Safety
         self._controller.e_stop.connect(self._emergency_stop)
@@ -217,8 +219,6 @@ class HostApp:
 
         # GoPro commands → direct HTTP through Pi proxy
         self._window.gopro_command.connect(self._on_gopro_command)
-        self._window.control_panel.record_toggle.connect(
-            lambda: self._window.gopro_command.emit("record_toggle", "", ""))
         self._window.gopro_probe.connect(self._on_gopro_probe)
         self._window.gopro_get_presets.connect(self._on_get_presets)
         self._window.gopro_load_preset.connect(self._on_load_preset)
@@ -249,6 +249,7 @@ class HostApp:
 
         self._window.show()
         self._controller.start()
+        self._window.motion_state.start_mock()
         self._window.set_lock_state(True)  # initial lock overlay
         self._recorder.start()
         self._update_tracking_status()
@@ -462,12 +463,12 @@ class HostApp:
                 tilt=angles.tilt,
             )
 
-        # Update servo sliders
-        self._window.control_panel.set_servo_angles(angles.pan, angles.tilt)
-
-        # Send servo commands over UDP (rate-limited)
-        self._send_servo(0, angles.pan)
-        self._send_servo(1, angles.tilt)
+        # Update gimbal display and send servo commands only when tracking a visible target.
+        # Otherwise manual stick input owns both the display and the servos.
+        if result is not None and result.visible and not result.lost:
+            self._window.gimbal_deflection.set_angles(angles.pan, angles.tilt)
+            self._send_servo(0, angles.pan)
+            self._send_servo(1, angles.tilt)
 
     def _draw_overlay(self, frame: np.ndarray, result):
         h, w = frame.shape[:2]
@@ -514,7 +515,7 @@ class HostApp:
         self._registry.check_all()
         for node_id, info in self._registry.get_all().items():
             elapsed = time.monotonic() - info.last_heartbeat
-            self._window.node_status.update_node(
+            self._window.component_status.update_component(
                 node_id, info.state, elapsed, f"State: {info.state.value}")
 
     def _process_telemetry(self):
@@ -621,7 +622,7 @@ class HostApp:
         """Fin steering from left stick X. Differential mixing for left/right fins.
         value = -1..1 (left..right). Center = 90 deg.
         """
-        max_deflection = 45.0  # max angle from center
+        max_deflection = self.config.plate_max_angle
         left_angle = 90.0 - value * max_deflection   # stick right → left fin forward (>90)
         right_angle = 90.0 + value * max_deflection  # stick right → right fin back (<90)
         self._send_servo(3, float(left_angle))
@@ -661,8 +662,9 @@ class HostApp:
     def _on_gimbal_recenter(self):
         """R3: recenter gimbal pitch/yaw."""
         logger.info("Gimbal recenter")
-        self._window.control_panel.tilt_changed.emit(90.0)
-        self._window.control_panel.pan_changed.emit(90.0)
+        self._send_servo(0, 90.0)
+        self._send_servo(1, 90.0)
+        self._window.gimbal_deflection.set_angles(90.0, 90.0)
 
     def _on_all_recenter(self):
         """Logo: all recenter — body, gimbal, winch to neutral."""
@@ -781,31 +783,30 @@ class HostApp:
                     break
 
     def _send_servo(self, servo_id: int, angle: float):
-        """Send servo angle command with rate-limiting.
-
-        Two-stage throttle:
-        1. Deadband: suppress changes smaller than _servo_deadband degrees.
-        2. Min interval: cap each servo at ~10 Hz to prevent UART flood on Pico.
-
-        The EMA smoothing in GameController produces unique values every poll
-        cycle (convergence), so deadband alone is insufficient.
-        """
+        """Send servo angle command with deadband + duplicate suppression."""
         now = time.monotonic()
         last = self._last_sent_angles.get(servo_id)
-        last_t = self._last_sent_time.get(servo_id, 0.0)
 
-        # Deadband check
-        if last is not None and abs(angle - last) <= self._servo_deadband:
+        # Skip if angle unchanged (stops continuous 90.0 flood when idle)
+        if last is not None and angle == last:
             return
 
-        # Min interval check — skip if sent too recently (unless change > 5 deg)
-        if last_t and (now - last_t) < self._servo_min_interval:
-            if abs(angle - (last or 90.0)) < 5.0:
-                return  # small change, not urgent
+        # Deadband: suppress sub-degree jitter (off-center only)
+        if angle != 90.0 and last is not None and abs(angle - last) <= self._servo_deadband:
+            return
 
+        # Min interval to prevent flooding at very high update rates
+        last_t = self._last_sent_time.get(servo_id, 0.0)
+        if last_t and (now - last_t) < self._servo_min_interval:
+            if last is not None and abs(angle - last) < 0.6:
+                return
+
+        self._servo_seq += 1
+        seq = self._servo_seq
         self._last_sent_angles[servo_id] = angle
         self._last_sent_time[servo_id] = now
-        self._schedule_async(self._udp.send(cmd_servo_set("host", servo_id, angle)))
+        self._schedule_async(
+            self._udp.send(cmd_servo_set("host", servo_id, angle, seq=seq)))
 
     def _emergency_stop(self):
         logger.warning("EMERGENCY STOP activated")
@@ -881,3 +882,8 @@ def _cv2():
         return cv2
     except ImportError:
         return None
+
+
+if __name__ == "__main__":
+    app = HostApp()
+    sys.exit(app.run())

@@ -23,8 +23,9 @@ from PySide6.QtWidgets import (
 from deepsight_host.ui.styles import DARK_THEME
 from deepsight_host.ui.dashboard import DashboardWidget
 from deepsight_host.ui.video_preview import VideoPreviewWidget
-from deepsight_host.ui.node_status import NodeStatusWidget
-from deepsight_host.ui.control_panel import ControlPanelWidget
+from deepsight_host.ui.component_status import ComponentStatusWidget
+from deepsight_host.ui.gimbal_deflection import GimbalDeflectionWidget
+from deepsight_host.ui.motion_state import MotionStateWidget
 from deepsight_host.ui.tracking_view import TrackingViewWidget
 from deepsight_host.ui.depth_chart import DepthChartWidget
 from deepsight_shared.constants import SafetyState
@@ -39,13 +40,16 @@ class MainWindow(QMainWindow):
     gopro_get_presets = Signal()  # request preset list from camera
     gopro_load_preset = Signal(int)  # load a specific preset by id
 
-    # GoPro HTTP results (emitted from async thread, handled on main thread)
+    # GoPro HTTP results
     gopro_presets_loaded = Signal(list, int)  # presets, active_id
     gopro_settings_loaded = Signal(dict)  # all camera settings
     gopro_setting_result = Signal(str, str, bool, object)  # setting, value, ok, available
     gopro_probe_result = Signal(str, str, object, bool)  # setting, current, available, changed
-    gopro_status_updated = Signal(dict)  # raw camera state for node_status
+    gopro_status_updated = Signal(dict)  # raw camera state for component_status
     gopro_preset_switched = Signal(int, object)  # preset_id, aspect_ratio (w,h) or None
+
+    # Standalone E-Stop signal
+    e_stop = Signal()
 
     def __init__(self):
         super().__init__()
@@ -68,7 +72,7 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(4)
 
-        # ── Top bar: compact ──
+        # ── Top bar ──
         top = QHBoxLayout()
         top.setSpacing(8)
 
@@ -106,7 +110,7 @@ class MainWindow(QMainWindow):
         # ── Main area: two stacked horizontal splitters ──
         self._main_vsplit = QSplitter(Qt.Vertical)
 
-        # -- Top row: video (left) | controls (right) --
+        # -- Top row: video (left) | status widgets (right) --
         top_hsplit = QSplitter(Qt.Horizontal)
 
         self._video = VideoPreviewWidget()
@@ -120,8 +124,25 @@ class MainWindow(QMainWindow):
         self._tracking_view = TrackingViewWidget()
         right_top_layout.addWidget(self._tracking_view)
 
-        self._control_panel = ControlPanelWidget()
-        right_top_layout.addWidget(self._control_panel)
+        self._gimbal_deflection = GimbalDeflectionWidget()
+        right_top_layout.addWidget(self._gimbal_deflection)
+
+        self._motion_state = MotionStateWidget()
+        right_top_layout.addWidget(self._motion_state)
+
+        # Standalone E-Stop button
+        self._e_stop_btn = QPushButton(tr("safety.e_stop"))
+        self._e_stop_btn.setStyleSheet(
+            "QPushButton { background-color: #cc2222; color: white; font-weight: bold; "
+            "font-size: 13px; border: 2px solid #ff4444; border-radius: 6px; "
+            "padding: 8px 16px; min-height: 36px; }"
+            "QPushButton:hover { background-color: #dd3333; }"
+            "QPushButton:pressed { background-color: #aa1111; }"
+        )
+        self._e_stop_btn.clicked.connect(self.e_stop.emit)
+        right_top_layout.addWidget(self._e_stop_btn)
+
+        right_top_layout.addStretch()
 
         top_hsplit.addWidget(right_top)
         top_hsplit.setStretchFactor(0, 7)
@@ -129,7 +150,7 @@ class MainWindow(QMainWindow):
 
         self._main_vsplit.addWidget(top_hsplit)
 
-        # -- Bottom row: status (left) | chart (right) --
+        # -- Bottom row: components + dashboard (left) | chart (right) --
         bottom_hsplit = QSplitter(Qt.Horizontal)
 
         status_widget = QWidget()
@@ -137,8 +158,8 @@ class MainWindow(QMainWindow):
         status_layout.setContentsMargins(4, 4, 4, 4)
         status_layout.setSpacing(8)
 
-        self._node_status = NodeStatusWidget()
-        status_layout.addWidget(self._node_status, 1)
+        self._component_status = ComponentStatusWidget()
+        status_layout.addWidget(self._component_status, 1)
 
         self._dashboard = DashboardWidget()
         status_layout.addWidget(self._dashboard, 2)
@@ -160,7 +181,6 @@ class MainWindow(QMainWindow):
 
         self._main_vsplit.addWidget(bottom_hsplit)
 
-        # Let native splitter handle show (QSplitter { background: transparent } in theme)
         self._main_vsplit.setHandleWidth(12)
         top_hsplit.setHandleWidth(12)
         bottom_hsplit.setHandleWidth(12)
@@ -231,7 +251,6 @@ class MainWindow(QMainWindow):
         self._presets_dlg.show()
         self._presets_dlg.raise_()
         self._presets_dlg.activateWindow()
-        # Fetch presets from camera on open
         self.gopro_get_presets.emit()
 
     def _on_gopro_dlg_closed(self):
@@ -262,28 +281,24 @@ class MainWindow(QMainWindow):
 
     @property
     def gopro_dialog(self):
-        """Return the current GoPro control dialog if open, else None."""
         return getattr(self, '_gopro_dlg', None)
 
     @property
     def presets_dialog(self):
-        """Return the current presets dialog if open, else None."""
         return getattr(self, '_presets_dlg', None)
 
     def set_presets_result(self, presets: list[dict], active_preset_id: int):
-        """Receive preset data and update the presets dialog."""
         dlg = self.presets_dialog
         if dlg is not None:
             dlg.set_presets(presets, active_preset_id)
 
     def set_gopro_status(self, data: dict):
-        """Update node status widget with GoPro state."""
+        """Update component status widget with GoPro state."""
         if not data.get("online"):
-            self.node_status.update_node(
+            self.component_status.update_component(
                 "gopro", None, 0, tr("gopro.offline"))
             self._video.set_recording(False)
             self._video.set_battery(0)
-            self._control_panel.set_gopro_status(False, 0, 0)
             return
 
         bat = data.get("battery_pct", 0)
@@ -293,7 +308,6 @@ class MainWindow(QMainWindow):
         rec = "●" if recording else "○"
         sd_bytes = data.get("sd_remaining_bytes", 0)
         sd_gb = sd_bytes / 1e9 if sd_bytes > 0 else 0
-        self._control_panel.set_gopro_status(recording, bat, sd_gb)
 
         if sd_gb >= 1:
             sd_str = f"{sd_gb:.0f}GB"
@@ -302,7 +316,7 @@ class MainWindow(QMainWindow):
         else:
             sd_str = "--"
 
-        self.node_status.update_node("gopro", SafetyState.NOMINAL, 0,
+        self.component_status.update_component("gopro", SafetyState.NOMINAL, 0,
             f"REC {rec}  {bat}%  SD {sd_str}")
 
     def _connect_gopro_signals(self):
@@ -333,7 +347,6 @@ class MainWindow(QMainWindow):
             dlg.set_probe_result(setting, current, available, changed)
 
     def set_config(self, config):
-        """Store reference to HostConfig for settings dialog."""
         self.config = config
 
     def showEvent(self, event):
@@ -343,7 +356,6 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(100, self._apply_initial_split)
 
     def _apply_initial_split(self):
-        """Set 4:1 top:bottom split after layout is computed."""
         total = self._main_vsplit.height()
         if total > 0:
             self._main_vsplit.setSizes([total * 4 // 5, total * 1 // 5])
@@ -358,6 +370,7 @@ class MainWindow(QMainWindow):
         self._safety_header_label.setText(tr("app.safety") + ":")
         self._safety_label.setText(tr(f"safety.{self._current_safety}"))
         self._lock_label.setText(tr(f"safety.{'locked' if self._current_safety == 'locked' else 'unlocked'}"))
+        self._e_stop_btn.setText(tr("safety.e_stop"))
         self._settings_menu.setTitle(tr("menu.settings"))
         self._album_menu.setTitle(tr("menu.album"))
         self._about_menu.setTitle(tr("menu.about"))
@@ -400,12 +413,16 @@ class MainWindow(QMainWindow):
         return self._dashboard
 
     @property
-    def node_status(self) -> NodeStatusWidget:
-        return self._node_status
+    def component_status(self) -> ComponentStatusWidget:
+        return self._component_status
 
     @property
-    def control_panel(self) -> ControlPanelWidget:
-        return self._control_panel
+    def gimbal_deflection(self) -> GimbalDeflectionWidget:
+        return self._gimbal_deflection
+
+    @property
+    def motion_state(self) -> MotionStateWidget:
+        return self._motion_state
 
     @property
     def tracking_view(self) -> TrackingViewWidget:
@@ -414,6 +431,9 @@ class MainWindow(QMainWindow):
     @property
     def depth_chart(self) -> DepthChartWidget:
         return self._depth_chart
+
+    def set_gamepad_connected(self, connected: bool, info: str = ""):
+        self._component_status.update_gamepad(connected, info)
 
     def set_safety_state(self, state: str, color: str):
         self._current_safety = state
@@ -434,7 +454,6 @@ class MainWindow(QMainWindow):
         self._safety_label.style().polish(self._safety_label)
 
     def set_lock_state(self, locked: bool):
-        """Update the lock state indicator in the top bar and video overlay."""
         if locked:
             self._lock_label.setText(tr("safety.locked"))
             self._lock_label.setObjectName("status_red")

@@ -145,6 +145,38 @@ class SettingsDialog(QDialog):
 
         self._tabs.addTab(self._control_tab, tr("settings.tab_control"))
 
+        # ── Gimbal tab ──
+        self._gimbal_tab = QWidget()
+        gim_layout = QFormLayout(self._gimbal_tab)
+        gim_layout.setSpacing(10)
+
+        self._gimbal_yaw_max = QDoubleSpinBox()
+        self._gimbal_yaw_max.setRange(1.0, 90.0)
+        self._gimbal_yaw_max.setSingleStep(1.0)
+        self._gimbal_yaw_max.setSuffix(" deg")
+        gim_layout.addRow(tr("settings.gimbal_yaw_max"), self._gimbal_yaw_max)
+
+        self._gimbal_pitch_max = QDoubleSpinBox()
+        self._gimbal_pitch_max.setRange(1.0, 90.0)
+        self._gimbal_pitch_max.setSingleStep(1.0)
+        self._gimbal_pitch_max.setSuffix(" deg")
+        gim_layout.addRow(tr("settings.gimbal_pitch_max"), self._gimbal_pitch_max)
+
+        self._tabs.addTab(self._gimbal_tab, tr("settings.tab_gimbal"))
+
+        # ── Plate tab ──
+        self._plate_tab = QWidget()
+        plate_layout = QFormLayout(self._plate_tab)
+        plate_layout.setSpacing(10)
+
+        self._plate_max = QDoubleSpinBox()
+        self._plate_max.setRange(1.0, 90.0)
+        self._plate_max.setSingleStep(1.0)
+        self._plate_max.setSuffix(" deg")
+        plate_layout.addRow(tr("settings.plate_max"), self._plate_max)
+
+        self._tabs.addTab(self._plate_tab, tr("settings.tab_plate"))
+
         # ── Safety tab ──
         self._safety_tab = QWidget()
         saf_layout = QFormLayout(self._safety_tab)
@@ -225,6 +257,10 @@ class SettingsDialog(QDialog):
         self._dead_zone.setValue(c.dead_zone)
         self._neutral_angle.setValue(c.servo_neutral_angle)
 
+        self._gimbal_yaw_max.setValue(c.gimbal_yaw_max_angle)
+        self._gimbal_pitch_max.setValue(c.gimbal_pitch_max_angle)
+        self._plate_max.setValue(c.plate_max_angle)
+
         self._lost_hold.setValue(c.tracking_lost_hold_s)
         self._lost_neutral.setValue(c.tracking_lost_neutral_s)
 
@@ -256,6 +292,13 @@ class SettingsDialog(QDialog):
         c.max_servo_speed = self._max_servo_speed.value()
         c.dead_zone = self._dead_zone.value()
         c.servo_neutral_angle = self._neutral_angle.value()
+
+        # Gimbal
+        c.gimbal_yaw_max_angle = self._gimbal_yaw_max.value()
+        c.gimbal_pitch_max_angle = self._gimbal_pitch_max.value()
+
+        # Plate
+        c.plate_max_angle = self._plate_max.value()
 
         # Safety
         c.tracking_lost_hold_s = self._lost_hold.value()
@@ -315,6 +358,13 @@ class SettingsDialog(QDialog):
                 "max_servo_speed": c.max_servo_speed,
                 "dead_zone": c.dead_zone,
             },
+            "gimbal": {
+                "yaw_max_angle": c.gimbal_yaw_max_angle,
+                "pitch_max_angle": c.gimbal_pitch_max_angle,
+            },
+            "plate": {
+                "max_angle": c.plate_max_angle,
+            },
             "safety": {
                 "tracking_lost_hold_s": c.tracking_lost_hold_s,
                 "tracking_lost_neutral_s": c.tracking_lost_neutral_s,
@@ -345,6 +395,9 @@ class SettingsDialog(QDialog):
         self._max_servo_speed.setValue(60.0)
         self._dead_zone.setValue(0.02)
         self._neutral_angle.setValue(90.0)
+        self._gimbal_yaw_max.setValue(15.0)
+        self._gimbal_pitch_max.setValue(15.0)
+        self._plate_max.setValue(45.0)
         self._lost_hold.setValue(0.5)
         self._lost_neutral.setValue(2.0)
         self._log_level.setCurrentText("DEBUG")
@@ -355,8 +408,10 @@ class SettingsDialog(QDialog):
         self._tabs.setTabText(0, tr("settings.tab_network"))
         self._tabs.setTabText(1, tr("settings.tab_tracking"))
         self._tabs.setTabText(2, tr("settings.tab_control"))
-        self._tabs.setTabText(3, tr("settings.tab_safety"))
-        self._tabs.setTabText(4, tr("settings.tab_logging"))
+        self._tabs.setTabText(3, tr("settings.tab_gimbal"))
+        self._tabs.setTabText(4, tr("settings.tab_plate"))
+        self._tabs.setTabText(5, tr("settings.tab_safety"))
+        self._tabs.setTabText(6, tr("settings.tab_logging"))
         self._btn_box.button(QDialogButtonBox.Ok).setText(tr("settings.ok"))
         self._btn_box.button(QDialogButtonBox.Cancel).setText(tr("settings.cancel"))
         self._reset_btn.setText(tr("settings.reset_defaults"))

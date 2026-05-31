@@ -11,7 +11,8 @@ network:
   host_ws_port: 5001
 
 serial:
-  pico_port: "/dev/ttyAMA0"     # Pico UART (set "mock" for simulated sensors)
+  pico_port: "/dev/ttyACM0"     # Pico USB CDC (runtime data: cmd + telemetry)
+  pico_telemetry_port: "/dev/ttyACM0"  # same as pico_port (no hybrid split)
   stm32_port: "/dev/ttyAMA1"    # STM32 UART (set "mock" for simulated winch)
   pico_baud: 115200
   stm32_baud: 115200

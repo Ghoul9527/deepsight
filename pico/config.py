@@ -11,17 +11,19 @@ CONTROL_LOOP_HZ = 50
 CONTROL_LOOP_DT = 1.0 / CONTROL_LOOP_HZ
 
 # -- Serial ------------------------------------------------
+SERIAL_LINK = "usb"      # "usb" = USB CDC, "uart" = GPIO UART
 SERIAL_BAUD = 115200
 SERIAL_MOCK = False
-SERIAL_TX_PIN = 0   # UART0 TX -> Pi RX (GPIO15)
-SERIAL_RX_PIN = 1   # UART0 RX <- Pi TX (GPIO14)
-ENABLE_UART_READ = True  # Host-side deadband + per-tick drain prevents RX flood
+SERIAL_TX_PIN = 0        # UART0 TX (Pico pin GP0) — used for REPL/mpremote
+SERIAL_RX_PIN = 1        # UART0 RX (Pico pin GP1)
+SERIAL_TELEMETRY = "usb"  # all runtime data via USB CDC
+ENABLE_UART_READ = True
 
 # -- Mock mode ---------------------------------------------
-MOCK_ENABLED = True
+MOCK_ENABLED = False
 
 # -- Safety ------------------------------------------------
-NO_COMMAND_TIMEOUT_S = 1.0
+NO_COMMAND_TIMEOUT_S = 3.0
 DEFAULT_SERVO_ANGLE = 90.0
 MAX_SERVO_ANGLE = 180.0
 MIN_SERVO_ANGLE = 0.0
@@ -60,7 +62,7 @@ BME280_I2C_FREQ = 400000
 # -- Lighting (PWM) ---------------------------------------
 LIGHTING_CHANNELS = 4
 LIGHTING_PWM_FREQ = 1000
-LIGHTING_PWM_PINS = [0, 1, 2, 3]
+LIGHTING_PWM_PINS = [6, 7, 8, 9]
 
 # -- Leak sensor (ADC) ------------------------------------
 LEAK_CHANNELS = 4

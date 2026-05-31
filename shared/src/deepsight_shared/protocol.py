@@ -73,9 +73,10 @@ def make_heartbeat(node_id: str) -> Message:
 # ---- Commands ----
 
 
-def cmd_servo_set(node_id: str, servo_id: int, angle: float, speed: float = 0.0) -> Message:
+def cmd_servo_set(node_id: str, servo_id: int, angle: float,
+                  speed: float = 0.0, seq: int = 0) -> Message:
     return new_message(node_id, "cmd.servo.set", {
-        "servo_id": servo_id, "angle": angle, "speed": speed,
+        "servo_id": servo_id, "angle": angle, "speed": speed, "seq": seq,
     })
 
 

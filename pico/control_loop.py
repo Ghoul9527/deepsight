@@ -1,5 +1,6 @@
 """Deterministic realtime control loop - 50 Hz."""
 
+import gc
 import time
 
 import config
@@ -31,12 +32,32 @@ class ControlLoop:
 
         # State
         self._running = False
-        self._telemetry_counter = 0
-        self._heartbeat_counter = 0
+        self._rx_line_count = 0
+        self._rx_servo_count = 0
+        self._last_servo_seq: dict[int, int] = {}  # servo_id -> last seq seen
+        self._loop_count = 0
+        self._last_loop_report = 0.0
+        self._loop_hz = 0.0
+        self._step_ms = 0
+        self._sensor_ms = 0
+
+        self._gc_counter = 0  # only gc.collect() every N iterations
+
+        # Staggered sensor reads: read one sensor per tick to avoid I2C blocking
+        self._sensor_phase = 0
+        self._sensor_cache = {
+            "yaw": 0.0, "pitch": 0.0, "roll": 0.0,
+            "ax": 0.0, "ay": 0.0, "az": 0.0,
+            "depth_m": 0.0, "pressure_mbar": 0.0, "water_temp_c": 0.0,
+            "env_temp_c": 0.0, "humidity_pct": 0.0, "env_pressure_hpa": 0.0,
+            "leak": [False, False, False, False],
+        }
 
         # Register command handlers
         self._parser.register("cmd.servo.set", self._handle_servo)
         self._parser.register("cmd.lighting.set", self._handle_lighting)
+        self._parser.register("sys.heartbeat", self._handle_heartbeat)
+        self._parser.register("tel.poll", self._handle_poll)
 
     def _handle_servo(self, payload: dict):
         servo_id = payload.get("servo_id", 0)
@@ -44,18 +65,54 @@ class ControlLoop:
         self.servo.set_angle(servo_id, angle)
         self._safety.command_received()
 
+    def _handle_heartbeat(self, _payload: dict):
+        self._safety.command_received()
+
     def _handle_lighting(self, payload: dict):
         channel = payload.get("channel", 0)
         brightness = payload.get("brightness", 0.0)
         self.lighting.set_brightness(channel, brightness)
 
+    def _handle_poll(self, _payload: dict):
+        """Respond to Pi's telemetry poll with compact sensor snapshot."""
+        s = self._sensor_cache
+        msg = telemetry.make_telemetry("t", {
+            "st": self._step_ms,
+            "hz": round(self._loop_hz, 1),
+            "rx": self._rx_line_count,
+            "rs": self._rx_servo_count,
+            "s0": self._last_servo_seq.get(0, 0),
+            "s1": self._last_servo_seq.get(1, 0),
+            "y": round(s["yaw"], 1),
+            "p": round(s["pitch"], 1),
+            "r": round(s["roll"], 1),
+            "ax": round(s["ax"], 2),
+            "ay": round(s["ay"], 2),
+            "az": round(s["az"], 2),
+            "d": round(s["depth_m"], 1),
+            "pr": round(s["pressure_mbar"], 1),
+            "wt": round(s["water_temp_c"], 1),
+            "et": round(s["env_temp_c"], 1),
+            "eh": round(s["humidity_pct"], 1),
+            "ep": round(s["env_pressure_hpa"], 1),
+            "le": s["leak"],
+        })
+        self._serial.write(msg)
+
     def init(self):
+        print("[PICO] init servo...")
         self.servo.init()
+        print("[PICO] init imu...")
         self.imu.init()
+        print("[PICO] init pressure...")
         self.pressure.init()
+        print("[PICO] init bme280...")
         self.bme280.init()
+        print("[PICO] init leak...")
         self.leak.init()
+        print("[PICO] init lighting...")
         self.lighting.init()
+        print("[PICO] init serial...")
         self._serial.init()
         self._serial.flush_input()  # discard startup noise
         print("[PICO] All drivers initialized")
@@ -63,77 +120,131 @@ class ControlLoop:
     def run(self):
         self._running = True
         last_time = time.time()
+        last_ticks = time.ticks_us()  # µs counter for precise loop pacing
         startup_ticks = 0  # grace period before reading UART
+        self._last_loop_report = time.time()
+        self._loop_count = 0
 
         print(f"[PICO] Control loop started @ {config.CONTROL_LOOP_HZ} Hz")
 
         while self._running:
             now = time.time()
-            dt = now - last_time
+            self._loop_count += 1
+
+            # Track actual loop rate (report every 5s)
+            if now - self._last_loop_report >= 5.0:
+                self._loop_hz = self._loop_count / (now - self._last_loop_report)
+                self._loop_count = 0
+                self._last_loop_report = now
+
+            # Precise pacing via µs counter (time.time() resolution is ~10ms)
+            dt = time.ticks_diff(time.ticks_us(), last_ticks) / 1000000.0
             if dt < config.CONTROL_LOOP_DT:
-                time.sleep(config.CONTROL_LOOP_DT - dt)
-                now = time.time()
+                time.sleep_us(int((config.CONTROL_LOOP_DT - dt) * 1000000))
                 dt = config.CONTROL_LOOP_DT
-            last_time = now
+            last_ticks = time.ticks_us()
 
             try:
-                self._step(dt, startup_ticks)
+                self._step(dt, now, startup_ticks)
             except Exception as e:
                 print(f"[PICO] Step error: {e}")
             if startup_ticks < 250:  # ~5s grace period
                 startup_ticks += 1
 
-    def _step(self, dt: float, startup_ticks: int = 999):
-        # Drain UART every tick to prevent RX buffer overflow.
-        # Only process the LAST complete line; stale commands are discarded.
-        last_line = None
+    def _step(self, dt: float, now: float, startup_ticks: int = 999):
+        t0 = time.time()
+        self._gc_counter += 1
+        if self._gc_counter >= 50:
+            gc.collect()
+            self._gc_counter = 0
+
+        # Drain commands FIRST — always process gamepad input before anything
+        # that might block (telemetry write). Idempotent: only last of each
+        # command type is dispatched.
         if config.ENABLE_UART_READ and startup_ticks >= 250:
-            while True:
-                line = self._serial.read_line()
+            last_servo = None
+            last_lighting = None
+            last_heartbeat = False
+            for _ in range(10):
+                try:
+                    line = self._serial.read_line()
+                except Exception as e:
+                    print(f"[PICO] read_line error: {e}")
+                    break
                 if line is None:
                     break
-                last_line = line  # keep only the most recent command
-        if last_line:
-            parsed = self._parser.parse(last_line)
-            if parsed:
-                cmd_type, payload = parsed
-                self._parser.dispatch(cmd_type, payload)
+                self._rx_line_count += 1
+                try:
+                    parsed = self._parser.parse(line)
+                    if parsed:
+                        cmd_type, payload = parsed
+                        if cmd_type == "cmd.servo.set":
+                            self._rx_servo_count += 1
+                            sid = payload.get("servo_id", 0)
+                            self._last_servo_seq[sid] = payload.get("seq", 0)
+                            last_servo = payload
+                        elif cmd_type == "cmd.lighting.set":
+                            last_lighting = payload
+                        elif cmd_type == "sys.heartbeat":
+                            last_heartbeat = True
+                        else:
+                            self._parser.dispatch(cmd_type, payload)
+                except Exception as e:
+                    print(f"[PICO] Parse error: {e}")
+            if last_heartbeat:
+                self._safety.command_received()
+            if last_servo is not None:
+                self._safety.command_received()
+                self._parser.dispatch("cmd.servo.set", last_servo)
+            if last_lighting is not None:
+                self._parser.dispatch("cmd.lighting.set", last_lighting)
 
         # Safety check
-        if self._safety.check():
-            defaults = self._safety.get_default_angles()
-            for i, angle in enumerate(defaults):
-                self.servo.set_angle(i, angle)
+        try:
+            if self._safety.check():
+                defaults = self._safety.get_default_angles()
+                for i, angle in enumerate(defaults):
+                    self.servo.set_angle(i, angle)
+        except Exception as e:
+            print(f"[PICO] safety error: {e}")
 
-        # Telemetry at 1 Hz (was 25 Hz - exceeded 115200 baud)
-        self._telemetry_counter += 1
-        self._heartbeat_counter += 1
+        # Stagger sensor reads to avoid I2C blocking the control loop
+        try:
+            self._read_sensors_staggered()
+        except Exception as e:
+            print(f"[PICO] sensor error: {e}")
 
-        if self._telemetry_counter >= 50:  # 1 Hz (50 ticks x 20ms = 1s)
-            self._telemetry_counter = 0
-            self._send_telemetry()
+        self._step_ms = int((time.time() - t0) * 1000)
 
-        if self._heartbeat_counter >= 50:  # ~1 Hz heartbeat
-            self._heartbeat_counter = 0
-            self._serial.write(telemetry.tel_heartbeat())
-
-    def _send_telemetry(self):
-        # Combine all sensor data into a single message to minimize UART writes
-        yaw, pitch, roll, ax, ay, az = self.imu.read()
-        depth_m, pressure_mbar, temp_c = self.pressure.read()
-        env_temp, humidity, pressure_hpa = self.bme280.read()
-        leak_states = [self.leak.is_wet(ch) for ch in range(4)]
-
-        msg = telemetry.make_telemetry("tel.sensors", {
-            "yaw": yaw, "pitch": pitch, "roll": roll,
-            "accel_x": ax, "accel_y": ay, "accel_z": az,
-            "depth_m": depth_m, "pressure_mbar": pressure_mbar,
-            "water_temp_c": temp_c,
-            "env_temp_c": env_temp, "humidity_pct": humidity,
-            "env_pressure_hpa": pressure_hpa,
-            "leak": leak_states,
-        })
-        self._serial.write(msg)
+    def _read_sensors_staggered(self):
+        """Read one sensor per tick in round-robin to keep loop fast."""
+        try:
+            t0 = time.time()
+            if self._sensor_phase == 0:
+                yaw, pitch, roll, ax, ay, az = self.imu.read()
+                self._sensor_cache["yaw"] = yaw
+                self._sensor_cache["pitch"] = pitch
+                self._sensor_cache["roll"] = roll
+                self._sensor_cache["ax"] = ax
+                self._sensor_cache["ay"] = ay
+                self._sensor_cache["az"] = az
+            elif self._sensor_phase == 1:
+                depth_m, pressure_mbar, temp_c = self.pressure.read()
+                self._sensor_cache["depth_m"] = depth_m
+                self._sensor_cache["pressure_mbar"] = pressure_mbar
+                self._sensor_cache["water_temp_c"] = temp_c
+            elif self._sensor_phase == 2:
+                env_temp, humidity, pressure_hpa = self.bme280.read()
+                self._sensor_cache["env_temp_c"] = env_temp
+                self._sensor_cache["humidity_pct"] = humidity
+                self._sensor_cache["env_pressure_hpa"] = pressure_hpa
+            elif self._sensor_phase == 3:
+                for ch in range(4):
+                    self._sensor_cache["leak"][ch] = self.leak.is_wet(ch)
+            self._sensor_ms = int((time.time() - t0) * 1000)
+        except Exception:
+            self._sensor_ms = -1
+        self._sensor_phase = (self._sensor_phase + 1) % 4
 
     def stop(self):
         self._running = False

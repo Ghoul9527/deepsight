@@ -94,6 +94,8 @@ class MPU6050Driver(IMUDriver):
         super().deinit()
 
     def read(self) -> tuple:
+        if not self.initialized:
+            return (self._yaw, self._pitch, self._roll, 0.0, 0.0, 9.81)
         raw = self._read_sensors()
         if raw is None:
             return (self._yaw, self._pitch, self._roll, 0.0, 0.0, 9.81)

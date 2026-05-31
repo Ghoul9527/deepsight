@@ -116,6 +116,9 @@ class GameController(QObject):
       - All auto-actions are cancelled on E-stop or re-lock.
     """
 
+    # ── Connection ──
+    connection_changed = Signal(bool)          # gamepad connected/disconnected
+
     # ── Analog axes ──
     winch_speed_changed = Signal(float)       # -1..1, positive = reel in (ascend)
     plate_yaw_changed = Signal(float)          # -1..1
@@ -152,7 +155,8 @@ class GameController(QObject):
         dead_zone: float = 0.08,
         smoothing_alpha: float = 0.4,
         max_winch_speed: float = 100.0,
-        max_servo_speed: float = 15.0,  # gimbal range in degrees from center
+        gimbal_yaw_max_angle: float = 15.0,  # yaw max deflection from center
+        gimbal_pitch_max_angle: float = 15.0,  # pitch max deflection from center
         sensitivity_step: float = 0.1,
         sensitivity_min: float = 0.2,
         sensitivity_max: float = 2.0,
@@ -168,7 +172,8 @@ class GameController(QObject):
         self._dead_zone = dead_zone
         self._smoothing_alpha = smoothing_alpha
         self._max_winch_speed = max_winch_speed
-        self._max_servo_speed = max_servo_speed
+        self._gimbal_yaw_max = gimbal_yaw_max_angle
+        self._gimbal_pitch_max = gimbal_pitch_max_angle
         self._sensitivity_step = sensitivity_step
         self._sensitivity_min = sensitivity_min
         self._sensitivity_max = sensitivity_max
@@ -402,6 +407,7 @@ class GameController(QObject):
                     self._joystick.get_numhats(),
                 )
                 self._timer.start(1000 // self._poll_hz)
+                self.connection_changed.emit(True)
                 return True
 
             logger.info("Game controller: no joystick detected via pygame")
@@ -416,6 +422,7 @@ class GameController(QObject):
             self._connected = True
             self._locked = True
             self._timer.start(1000 // self._poll_hz)
+            self.connection_changed.emit(True)
             return True
 
         # ── Tier 3: GCController bridge (macOS, GameController.framework) ──
@@ -426,6 +433,7 @@ class GameController(QObject):
             self._connected = True
             self._locked = True
             self._timer.start(1000 // self._poll_hz)
+            self.connection_changed.emit(True)
             return True
 
         # ── Tier 4: F310 USB bridge (deprecated, macOS 26+ HIDRM) ──
@@ -436,6 +444,7 @@ class GameController(QObject):
             self._connected = True
             self._locked = True
             self._timer.start(1000 // self._poll_hz)
+            self.connection_changed.emit(True)
             return True
 
         return False
@@ -456,6 +465,7 @@ class GameController(QObject):
             logger.info("Bridge: disconnected")
         self._connected = False
         self._locked = True
+        self.connection_changed.emit(False)
 
     # ── Main poll loop ──
 
@@ -548,14 +558,19 @@ class GameController(QObject):
         if self._locked:
             raw_gp = 0.0
         self._smooth_gimbal_pitch += (raw_gp - self._smooth_gimbal_pitch) * self._smoothing_alpha
-        gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._max_servo_speed
+        # Snap to center when stick is released and EMA has nearly converged
+        if raw_gp == 0.0 and abs(self._smooth_gimbal_pitch) < 0.02:
+            self._smooth_gimbal_pitch = 0.0
+        gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._gimbal_pitch_max
         self.gimbal_pitch_changed.emit(max(0.0, min(180.0, gimbal_pitch_angle)))
 
         raw_gy = bridge_axis("gimbal_yaw", 2)
         if self._locked:
             raw_gy = 0.0
         self._smooth_gimbal_yaw += (raw_gy - self._smooth_gimbal_yaw) * self._smoothing_alpha
-        gimbal_yaw_angle = 90.0 + self._smooth_gimbal_yaw * self._max_servo_speed
+        if raw_gy == 0.0 and abs(self._smooth_gimbal_yaw) < 0.02:
+            self._smooth_gimbal_yaw = 0.0
+        gimbal_yaw_angle = 90.0 + self._smooth_gimbal_yaw * self._gimbal_yaw_max
         self.gimbal_yaw_changed.emit(max(0.0, min(180.0, gimbal_yaw_angle)))
 
         # ── Buttons (edge-triggered) ──
@@ -731,7 +746,9 @@ class GameController(QObject):
         if self._locked:
             raw_gp = 0.0
         self._smooth_gimbal_pitch += (raw_gp - self._smooth_gimbal_pitch) * self._smoothing_alpha
-        gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._max_servo_speed
+        if raw_gp == 0.0 and abs(self._smooth_gimbal_pitch) < 0.02:
+            self._smooth_gimbal_pitch = 0.0
+        gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._gimbal_pitch_max
         self.gimbal_pitch_changed.emit(max(0.0, min(180.0, gimbal_pitch_angle)))
 
         # ── Gimbal yaw (right stick X) ──
@@ -739,7 +756,9 @@ class GameController(QObject):
         if self._locked:
             raw_gy = 0.0
         self._smooth_gimbal_yaw += (raw_gy - self._smooth_gimbal_yaw) * self._smoothing_alpha
-        gimbal_yaw_angle = 90.0 + self._smooth_gimbal_yaw * self._max_servo_speed
+        if raw_gy == 0.0 and abs(self._smooth_gimbal_yaw) < 0.02:
+            self._smooth_gimbal_yaw = 0.0
+        gimbal_yaw_angle = 90.0 + self._smooth_gimbal_yaw * self._gimbal_yaw_max
         self.gimbal_yaw_changed.emit(max(0.0, min(180.0, gimbal_yaw_angle)))
 
     # ── Buttons (edge-triggered) ──

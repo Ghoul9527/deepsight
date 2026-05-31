@@ -10,8 +10,8 @@ from deepsight_pi.bridge.host_link import HostLink
 from deepsight_pi.bridge.pico_link import PicoLink
 from deepsight_pi.bridge.stm32_link import Stm32Link
 from deepsight_shared.protocol import (
-    Message, make_heartbeat, sys_pong, sys_startup_status,
-    tel_pi_status,
+    Message, make_heartbeat, new_message, sys_pong, sys_startup_status,
+    tel_depth, tel_env, tel_imu, tel_leak, tel_pi_status,
 )
 
 logger = logging.getLogger("pi.bridge.router")
@@ -24,11 +24,17 @@ class MessageRouter:
         self._pico = pico_link
         self._stm32 = stm32_link
         self._running = False
+        # Coalesced servo commands: only the latest angle per servo is kept
+        self._servo_buf: dict[int, Message] = {}
+        self._lighting_buf: Message | None = None
+        self._send_interval = 0.025  # 40 Hz flush rate
 
     async def start(self):
         self._running = True
         asyncio.create_task(self._route_host_to_downstream())
+        asyncio.create_task(self._flush_downstream())
         asyncio.create_task(self._generate_telemetry())
+        asyncio.create_task(self._poll_pico())
         logger.info("MessageRouter started")
 
     async def _route_host_to_downstream(self):
@@ -40,11 +46,41 @@ class MessageRouter:
             except asyncio.TimeoutError:
                 pass
 
+    async def _flush_downstream(self):
+        """Send coalesced servo/lighting commands at fixed rate."""
+        while self._running:
+            await asyncio.sleep(self._send_interval)
+            count = 0
+            sent_ids = []
+            for sid, msg in list(self._servo_buf.items()):
+                p = msg.payload
+                logger.debug("[PI tx seq=%s] servo %s -> %.1f",
+                             p.get("seq", "?"), p.get("servo_id", "?"),
+                             p.get("angle", 0))
+                await self._pico.send(msg)
+                sent_ids.append(sid)
+                count += 1
+                if count >= 4:
+                    break
+            for sid in sent_ids:
+                self._servo_buf.pop(sid, None)
+            # Flush lighting
+            if self._lighting_buf is not None:
+                await self._pico.send(self._lighting_buf)
+                self._lighting_buf = None
+
     async def _handle_message(self, msg: Message):
         logger.debug("Routing: %s → %s", msg.node_id, msg.type)
 
-        if msg.type.startswith("cmd.servo") or msg.type.startswith("cmd.lighting"):
-            await self._pico.send(msg)
+        if msg.type.startswith("cmd.servo"):
+            # Coalesce: keep only the latest command per servo
+            p = msg.payload
+            sid = p.get("servo_id", 0)
+            logger.debug("[PI rx seq=%s] servo %s -> %.1f  payload_keys=%s",
+                         p.get("seq", "?"), sid, p.get("angle", 0), list(p.keys()))
+            self._servo_buf[sid] = msg
+        elif msg.type.startswith("cmd.lighting"):
+            self._lighting_buf = msg
         elif msg.type.startswith("cmd.winch"):
             await self._stm32.send(msg)
         elif msg.type == "sys.ping":
@@ -53,7 +89,7 @@ class MessageRouter:
         elif msg.type == "cmd.sys.startup_check":
             await self.startup_check()
         elif msg.type == "sys.heartbeat":
-            pass
+            await self._pico.send(msg)
         elif msg.type == "sys.safety":
             await self._pico.send(msg)
             await self._stm32.send(msg)
@@ -71,12 +107,14 @@ class MessageRouter:
             while not self._pico.recv_queue.empty():
                 try:
                     msg = self._pico.recv_queue.get_nowait()
-                    await self._host.send(msg)
+                    if msg.type == "t":
+                        await self._translate_compact(msg)
+                    else:
+                        await self._host.send(msg)
                     pico_alive = True
                 except asyncio.QueueEmpty:
                     break
             if pico_alive:
-                logger.debug("Forwarding Pico heartbeat to Host")
                 await self._host.send(make_heartbeat("pico"))
 
             # ── Drain STM32 recv queue ──
@@ -106,6 +144,52 @@ class MessageRouter:
 
             msg = make_heartbeat("pi")
             await self._host.send(msg)
+
+    async def _poll_pico(self):
+        """Poll Pico for telemetry at 1 Hz. Pico responds immediately,
+        avoiding the 1s blocking write that occurs with periodic output."""
+        await asyncio.sleep(2.0)  # wait for Pico boot
+        while self._running:
+            try:
+                msg = new_message("pi", "tel.poll")
+                await self._pico.send(msg)
+            except Exception as e:
+                logger.debug("Poll Pico error: %s", e)
+            await asyncio.sleep(1.0)
+
+    async def _translate_compact(self, msg: Message):
+        """Split compact type 't' into individual tel.imu/depth/env/leak."""
+        p = msg.payload
+        node = msg.node_id
+        logger.debug("[PI poll_resp] s0=%s s1=%s rs=%s hz=%s st=%s",
+                     p.get("s0", "?"), p.get("s1", "?"),
+                     p.get("rs", "?"), p.get("hz", "?"), p.get("st", "?"))
+
+        await self._host.send(tel_imu(
+            node,
+            yaw=float(p.get("y", 0)),
+            pitch=float(p.get("p", 0)),
+            roll=float(p.get("r", 0)),
+            ax=float(p.get("ax", 0)),
+            ay=float(p.get("ay", 0)),
+            az=float(p.get("az", 0)),
+        ))
+        await self._host.send(tel_depth(
+            node,
+            depth_m=float(p.get("d", 0)),
+            pressure_mbar=float(p.get("pr", 0)),
+            temperature_c=float(p.get("wt", 0)),
+        ))
+        await self._host.send(tel_env(
+            node,
+            temp_c=float(p.get("et", 0)),
+            humidity=float(p.get("eh", 0)),
+            pressure_hpa=float(p.get("ep", 0)),
+        ))
+        for ch in range(4):
+            leaks = p.get("le", [False, False, False, False])
+            wet = bool(leaks[ch]) if ch < len(leaks) else False
+            await self._host.send(tel_leak(node, ch, wet))
 
     async def startup_check(self) -> dict[str, dict]:
         """Run self-checks and report to Host."""

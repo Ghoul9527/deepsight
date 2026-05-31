@@ -1,18 +1,48 @@
-"""Serial link to Raspberry Pi over UART."""
+"""Serial link to Raspberry Pi over USB CDC or GPIO UART.
 
-import json
+Hybrid mode: read commands from USB CDC (never blocks), write telemetry
+to GPIO UART (never blocks USB protocol stack). Set by config.SERIAL_TELEMETRY.
+"""
+
+import gc
 import config
+from machine import Pin
+
+_LED = Pin(25, Pin.OUT)
 
 
 class SerialLink:
     def __init__(self):
-        self._buffer = ""
         self._uart = None
         self._mock_mode = config.SERIAL_MOCK
         self._mock_send_queue = []
+        self._usb_mode = getattr(config, "SERIAL_LINK", "uart") == "usb"
+        self._telem_uart = (
+            self._usb_mode
+            and getattr(config, "SERIAL_TELEMETRY", "usb") == "uart"
+        )
+
+        # Pre-allocated bytearray buffer for UART mode
+        self._buf = bytearray(1024)
+        self._buf_len = 0
 
     def init(self):
-        if not self._mock_mode:
+        if self._mock_mode:
+            return
+        if self._usb_mode:
+            if self._telem_uart:
+                from machine import UART, Pin
+                self._uart = UART(
+                    0,
+                    baudrate=config.SERIAL_BAUD,
+                    tx=Pin(config.SERIAL_TX_PIN),
+                    rx=Pin(config.SERIAL_RX_PIN),
+                    bits=8,
+                    parity=None,
+                    stop=1,
+                )
+            return
+        if not self._usb_mode:
             from machine import UART, Pin
             self._uart = UART(
                 0,
@@ -25,10 +55,16 @@ class SerialLink:
             )
 
     def flush_input(self):
-        """Discard pending RX data. Limit to HW FIFO size to avoid blocking."""
-        if self._mock_mode or self._uart is None:
+        if self._mock_mode:
             return
-        # RP2040 UART FIFO is 256 bytes, read at most 4 x 64 = 256 bytes
+        if self._usb_mode:
+            import sys
+            import select
+            while select.select([sys.stdin], [], [], 0)[0]:
+                sys.stdin.read(64)
+            return
+        if self._uart is None:
+            return
         for _ in range(4):
             if not self._uart.any():
                 break
@@ -42,31 +78,77 @@ class SerialLink:
                 return sys.stdin.readline().strip()
             return None
 
+        if self._usb_mode:
+            import sys
+            import select
+            if not select.select([sys.stdin], [], [], 0)[0]:
+                return None
+            try:
+                line = sys.stdin.readline()
+                if line:
+                    return line.strip()
+            except Exception:
+                pass
+            return None
+
         if self._uart is None:
             return None
-        # Limit: read at most 128 bytes per call to avoid hogging
-        max_read = 128
-        while max_read > 0 and self._uart.any():
-            b = self._uart.read(1)
-            max_read -= 1
-            if b is None:
-                break
-            ch = chr(b[0]) if isinstance(b, bytes) else chr(b)
-            if ch == "\n":
-                line = self._buffer
-                self._buffer = ""
-                return line.strip()
-            if len(self._buffer) >= 1024:
-                self._buffer = ""  # overflow protection
-            self._buffer += ch
+
+        # Bulk read all available bytes, then split by newline
+        if self._uart.any():
+            raw = self._uart.read(self._uart.any())
+            if raw:
+                if isinstance(raw, bytes):
+                    new_len = self._buf_len + len(raw)
+                    if new_len <= 1024:
+                        self._buf[self._buf_len:new_len] = raw
+                        self._buf_len = new_len
+                    else:
+                        self._buf_len = 0
+                        gc.collect()
+                        return None
+
+        # Return first complete line in buffer
+        if self._buf_len > 0:
+            for i in range(self._buf_len):
+                if self._buf[i] == 0x0A:
+                    line_bytes = bytes(self._buf[:i])
+                    tail_len = self._buf_len - i - 1
+                    if tail_len > 0:
+                        self._buf[0:tail_len] = self._buf[i + 1:self._buf_len]
+                    self._buf_len = tail_len
+                    try:
+                        return line_bytes.decode("ascii", "ignore").strip()
+                    except Exception:
+                        return None
+                    break
+
+        # Overflow protection
+        if self._buf_len >= 1024:
+            self._buf_len = 0
+            gc.collect()
+
         return None
 
     def write(self, data: str):
         if self._mock_mode:
             self._mock_send_queue.append(data)
-            print(f"[MOCK->Pi] {data}")
-        elif self._uart is not None:
+            print("[MOCK->Pi] %s" % data)
+            return
+        _LED.off()
+        if self._telem_uart and self._uart is not None:
+            # Write to GPIO UART, never blocks USB
             self._uart.write(data + "\n")
+            _LED.on()
+            return
+        if self._usb_mode:
+            import sys
+            sys.stdout.write(data + "\n")
+            _LED.on()
+            return
+        if self._uart is not None:
+            self._uart.write(data + "\n")
+        _LED.on()
 
     def available(self) -> bool:
         if self._mock_mode:

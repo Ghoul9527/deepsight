@@ -87,6 +87,13 @@ class HostConfig:
         self.max_servo_speed: float = c.get("max_servo_speed", 15.0)
         self.dead_zone: float = c.get("dead_zone", 0.02)
 
+        gi = data.get("gimbal", {})
+        self.gimbal_yaw_max_angle: float = gi.get("yaw_max_angle", 15.0)
+        self.gimbal_pitch_max_angle: float = gi.get("pitch_max_angle", 15.0)
+
+        pl = data.get("plate", {})
+        self.plate_max_angle: float = pl.get("max_angle", 45.0)
+
         s = data.get("safety", {})
         self.tracking_lost_hold_s: float = s.get("tracking_lost_hold_s", 0.5)
         self.tracking_lost_neutral_s: float = s.get("tracking_lost_neutral_s", 2.0)

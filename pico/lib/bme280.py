@@ -94,6 +94,8 @@ class BME280Driver(EnvSensorDriver):
 
     def read(self) -> tuple:
         """Return (temperature_c, humidity_pct, pressure_hpa)."""
+        if not self.initialized:
+            return (25.0, 50.0, 1013.25)
         raw = self._read_raw()
         if raw is None:
             return (25.0, 50.0, 1013.25)

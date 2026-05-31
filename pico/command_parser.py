@@ -16,7 +16,7 @@ class CommandParser:
             cmd_type = msg.get("type", "")
             payload = msg.get("payload", {})
             return (cmd_type, payload)
-        except (json.JSONDecodeError, KeyError, TypeError, MemoryError):
+        except (ValueError, KeyError, TypeError, MemoryError):
             return None
 
     def dispatch(self, cmd_type: str, payload: dict):

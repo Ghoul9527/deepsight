@@ -1,0 +1,142 @@
+"""Compact component status widget — horizontal connection indicators."""
+
+from __future__ import annotations
+
+import logging
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QFrame,
+)
+
+from deepsight_shared.constants import SafetyState
+from deepsight_host.ui.i18n import I18n, tr
+
+logger = logging.getLogger("host.ui.components")
+
+
+class ComponentStatusIndicator(QFrame):
+    def __init__(self, component_key: str, parent=None):
+        super().__init__(parent)
+        self._component_key = component_key
+        self._state = SafetyState.NOMINAL
+        self._ever_connected = False
+        self._setup_ui()
+
+    def _setup_ui(self):
+        self.setFrameStyle(QFrame.StyledPanel)
+        self.setStyleSheet(
+            "ComponentStatusIndicator { background-color: #12122a; border: 1px solid #2a2a4a; border-radius: 4px; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(2)
+
+        self._name_label = QLabel(tr(f"component.{self._component_key}"))
+        self._name_label.setStyleSheet("font-weight: bold; font-size: 11px;")
+        self._name_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._name_label)
+
+        self._state_label = QLabel(tr("component.state_offline"))
+        self._state_label.setObjectName("status_yellow")
+        self._state_label.setAlignment(Qt.AlignCenter)
+        self._state_label.setStyleSheet("font-size: 10px;")
+        layout.addWidget(self._state_label)
+
+        self._hb_label = QLabel("--")
+        self._hb_label.setObjectName("heading")
+        self._hb_label.setAlignment(Qt.AlignCenter)
+        self._hb_label.setStyleSheet("font-size: 9px;")
+        layout.addWidget(self._hb_label)
+
+        I18n.instance().language_changed.connect(self._retranslate)
+
+    def _retranslate(self, _lang: str = ""):
+        self._name_label.setText(tr(f"component.{self._component_key}"))
+        if not self._ever_connected:
+            self._state_label.setText(tr("component.state_offline"))
+        elif self._state is None:
+            self._state_label.setText(tr("component.state_offline"))
+        else:
+            state_map = {
+                SafetyState.NOMINAL: tr("component.state_healthy"),
+                SafetyState.DEGRADED: tr("component.state_degraded"),
+                SafetyState.CAUTION: tr("component.state_degraded"),
+                SafetyState.SAFE: tr("component.state_lost"),
+                SafetyState.EMERGENCY: tr("component.state_lost"),
+            }
+            text = state_map.get(self._state, "???")
+            self._state_label.setText(text)
+
+    def update_state(self, state: SafetyState | None, heartbeat_ago: float = 0.0,
+                     info: str = ""):
+        self._ever_connected = True
+        if state is None:
+            self._state_label.setText(tr("component.state_offline"))
+            self._state_label.setObjectName("status_yellow")
+            self._state_label.style().unpolish(self._state_label)
+            self._state_label.style().polish(self._state_label)
+            self._hb_label.setText(info)
+            return
+
+        self._state = state
+        state_map = {
+            SafetyState.NOMINAL: ("status_green", tr("component.state_healthy")),
+            SafetyState.DEGRADED: ("status_yellow", tr("component.state_degraded")),
+            SafetyState.CAUTION: ("status_yellow", tr("component.state_degraded")),
+            SafetyState.SAFE: ("status_red", tr("component.state_lost")),
+            SafetyState.EMERGENCY: ("status_red", tr("component.state_lost")),
+        }
+        obj_name, text = state_map.get(state, ("status_red", "???"))
+        self._state_label.setText(text)
+        self._state_label.setObjectName(obj_name)
+        self._state_label.style().unpolish(self._state_label)
+        self._state_label.style().polish(self._state_label)
+        self._hb_label.setText(f"{heartbeat_ago:.0f}s")
+
+    @property
+    def component_key(self) -> str:
+        return self._component_key
+
+
+class ComponentStatusWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._indicators: dict[str, ComponentStatusIndicator] = {}
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        self._title_label = QLabel(tr("tab.components"))
+        self._title_label.setStyleSheet("font-weight: bold; font-size: 10px; color: #8888cc;")
+        layout.addWidget(self._title_label)
+
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        for component_key in ["pi", "gopro", "pico", "stm32", "gamepad"]:
+            indicator = ComponentStatusIndicator(component_key)
+            self._indicators[component_key] = indicator
+            row.addWidget(indicator)
+        layout.addLayout(row)
+
+        I18n.instance().language_changed.connect(self._retranslate)
+
+    def _retranslate(self, _lang: str = ""):
+        self._title_label.setText(tr("tab.components"))
+
+    def update_component(self, component_id: str, state: SafetyState | None,
+                         heartbeat_ago: float = 0.0, info: str = ""):
+        if component_id in self._indicators:
+            self._indicators[component_id].update_state(state, heartbeat_ago, info)
+
+    def update_gamepad(self, connected: bool, info: str = ""):
+        state = SafetyState.NOMINAL if connected else None
+        text = info if info else (tr("component.connected") if connected else tr("component.disconnected"))
+        self.update_component("gamepad", state, 0.0, text)

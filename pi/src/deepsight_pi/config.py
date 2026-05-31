@@ -23,6 +23,7 @@ class PiConfig:
 
         s = data.get("serial", {})
         self.pico_port: str = s.get("pico_port", "mock")
+        self.pico_telemetry_port: str = s.get("pico_telemetry_port", s.get("pico_port", "mock"))
         self.stm32_port: str = s.get("stm32_port", "mock")
         self.pico_baud: int = s.get("pico_baud", 115200)
         self.stm32_baud: int = s.get("stm32_baud", 115200)

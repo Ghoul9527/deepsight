@@ -14,7 +14,8 @@ _translations: dict[str, dict[str, str]] = {
     "app.node_state": {"zh": "节点 %s: %s → %s", "en": "Node %s: %s → %s"},
 
     "tab.dashboard": {"zh": "仪表盘", "en": "Dashboard"},
-    "tab.nodes": {"zh": "节点", "en": "Nodes"},
+    "tab.nodes": {"zh": "节点", "en": "Nodes"},  # LEGACY
+    "tab.components": {"zh": "组件", "en": "Components"},
     "tab.tracking": {"zh": "追踪", "en": "Tracking"},
     "tab.controls": {"zh": "控制", "en": "Controls"},
 
@@ -31,22 +32,46 @@ _translations: dict[str, dict[str, str]] = {
     "safety.locked": {"zh": "已锁定", "en": "LOCKED"},
     "safety.unlocked": {"zh": "已解锁", "en": "UNLOCKED"},
 
-    "node.host": {"zh": "主机", "en": "Host"},
-    "node.pi": {"zh": "水下网关", "en": "UW Gateway"},
-    "node.pico": {"zh": "控制器", "en": "Controller"},
-    "node.stm32": {"zh": "绞车驱动", "en": "Winch Driver"},
-    "node.gopro": {"zh": "相机模组", "en": "Camera"},
-    "node.state_healthy": {"zh": "正常", "en": "Healthy"},
-    "node.state_degraded": {"zh": "降级", "en": "Degraded"},
-    "node.state_lost": {"zh": "失联", "en": "Lost"},
-    "node.state_unknown": {"zh": "未知", "en": "Unknown"},
-    "node.state_offline": {"zh": "未连接", "en": "Offline"},
-    "node.state_online": {"zh": "在线", "en": "Online"},
+    "node.host": {"zh": "主机", "en": "Host"},  # LEGACY
+    "node.pi": {"zh": "水下网关", "en": "UW Gateway"},  # LEGACY
+    "node.pico": {"zh": "控制器", "en": "Controller"},  # LEGACY
+    "node.stm32": {"zh": "绞车驱动", "en": "Winch Driver"},  # LEGACY
+    "node.gopro": {"zh": "相机模组", "en": "Camera"},  # LEGACY
+    "node.state_healthy": {"zh": "正常", "en": "Healthy"},  # LEGACY
+    "node.state_degraded": {"zh": "降级", "en": "Degraded"},  # LEGACY
+    "node.state_lost": {"zh": "失联", "en": "Lost"},  # LEGACY
+    "node.state_unknown": {"zh": "未知", "en": "Unknown"},  # LEGACY
+    "node.state_offline": {"zh": "未连接", "en": "Offline"},  # LEGACY
+    "node.state_online": {"zh": "在线", "en": "Online"},  # LEGACY
+    "component.host": {"zh": "主机", "en": "Host"},
+    "component.pi": {"zh": "水下网关", "en": "UW Gateway"},
+    "component.pico": {"zh": "控制器", "en": "Controller"},
+    "component.stm32": {"zh": "绞车驱动", "en": "Winch Driver"},
+    "component.gopro": {"zh": "相机模组", "en": "Camera"},
+    "component.gamepad": {"zh": "手柄", "en": "Gamepad"},
+    "component.state_healthy": {"zh": "正常", "en": "Healthy"},
+    "component.state_degraded": {"zh": "降级", "en": "Degraded"},
+    "component.state_lost": {"zh": "失联", "en": "Lost"},
+    "component.state_unknown": {"zh": "未知", "en": "Unknown"},
+    "component.state_offline": {"zh": "未连接", "en": "Offline"},
+    "component.state_online": {"zh": "在线", "en": "Online"},
+    "component.connected": {"zh": "已连接", "en": "Connected"},
+    "component.disconnected": {"zh": "未连接", "en": "Disconnected"},
 
-    "control.pan": {"zh": "水平", "en": "Pan"},
-    "control.tilt": {"zh": "俯仰", "en": "Tilt"},
-    "control.servo_manual": {"zh": "手动舵机控制", "en": "Manual Servo Control"},
-    "control.winch": {"zh": "绞车控制", "en": "Winch Control"},
+    "control.pan": {"zh": "水平", "en": "Pan"},  # LEGACY
+    "control.tilt": {"zh": "俯仰", "en": "Tilt"},  # LEGACY
+    "control.servo_manual": {"zh": "手动舵机控制", "en": "Manual Servo Control"},  # LEGACY
+    "control.winch": {"zh": "绞车控制", "en": "Winch Control"},  # LEGACY
+    "gimbal.title": {"zh": "云台偏转", "en": "Gimbal Deflection"},
+    "gimbal.pan": {"zh": "水平", "en": "Pan"},
+    "gimbal.tilt": {"zh": "俯仰", "en": "Tilt"},
+    "motion.title": {"zh": "运动状态", "en": "Motion State"},
+    "motion.descending": {"zh": "下降", "en": "Descending"},
+    "motion.hovering": {"zh": "悬停", "en": "Hovering"},
+    "motion.ascending": {"zh": "上升", "en": "Ascending"},
+    "motion.speed": {"zh": "速度", "en": "Speed"},
+    "motion.depth": {"zh": "深度", "en": "Depth"},
+    "motion.mock_hint": {"zh": "(模拟数据)", "en": "(Mock Data)"},
     "control.e_stop": {"zh": "紧急停止", "en": "EMERGENCY STOP"},
     "control.winch_up": {"zh": "收缆 ↑", "en": "Reel ↑"},
     "control.winch_stop": {"zh": "停止", "en": "STOP"},
@@ -69,10 +94,21 @@ _translations: dict[str, dict[str, str]] = {
     "tracking.active": {"zh": "追踪已激活", "en": "Tracking Active"},
     "tracking.reset_done": {"zh": "追踪器已重置", "en": "Tracker reset"},
 
-    "dashboard.imu": {"zh": "IMU", "en": "IMU"},
+    "dashboard.imu": {"zh": "IMU", "en": "IMU"},  # LEGACY
+    "dashboard.gyro": {"zh": "陀螺仪", "en": "Gyroscope"},
     "dashboard.depth": {"zh": "深度", "en": "Depth"},
     "dashboard.pressure": {"zh": "压力", "en": "Pressure"},
     "dashboard.env": {"zh": "环境", "en": "Environment"},
+    "dashboard.light": {"zh": "光照", "en": "Light"},
+    "dashboard.light_lux": {"zh": "照度", "en": "Lux"},
+    "dashboard.ebay": {"zh": "电仓", "en": "E-Bay"},
+    "dashboard.ebay_pressure": {"zh": "电仓压力", "en": "E-Bay Press"},
+    "dashboard.ebay_temp": {"zh": "电仓温度", "en": "E-Bay Temp"},
+    "dashboard.ebay_humidity": {"zh": "电仓湿度", "en": "E-Bay Hum"},
+    "dashboard.cambay": {"zh": "摄像仓", "en": "Cam Bay"},
+    "dashboard.cambay_pressure": {"zh": "摄像仓压力", "en": "Cam Press"},
+    "dashboard.cambay_temp": {"zh": "摄像仓温度", "en": "Cam Temp"},
+    "dashboard.cambay_humidity": {"zh": "摄像仓湿度", "en": "Cam Hum"},
     "dashboard.tracking_title": {"zh": "追踪", "en": "Tracking"},
     "dashboard.winch_title": {"zh": "绞车", "en": "Winch"},
     "dashboard.target_x": {"zh": "目标 X", "en": "Target X"},
@@ -127,6 +163,8 @@ _translations: dict[str, dict[str, str]] = {
     "settings.tab_tracking": {"zh": "追踪", "en": "Tracking"},
     "settings.tab_control": {"zh": "控制", "en": "Control"},
     "settings.tab_safety": {"zh": "安全", "en": "Safety"},
+    "settings.tab_gimbal": {"zh": "云台", "en": "Gimbal"},
+    "settings.tab_plate": {"zh": "舵板", "en": "Plate"},
     "settings.tab_logging": {"zh": "日志", "en": "Logging"},
     "settings.pi_ip": {"zh": "Pi IP 地址", "en": "Pi IP Address"},
     "settings.udp_port": {"zh": "UDP 端口", "en": "UDP Port"},
@@ -140,6 +178,9 @@ _translations: dict[str, dict[str, str]] = {
     "settings.dead_zone": {"zh": "死区", "en": "Dead Zone"},
     "settings.dead_zone_tip": {"zh": "画面中心死区比例", "en": "Fraction of frame center dead zone"},
     "settings.neutral_angle": {"zh": "中立角度", "en": "Neutral Angle"},
+    "settings.gimbal_yaw_max": {"zh": "航向最大偏转角", "en": "Yaw Max Angle"},
+    "settings.gimbal_pitch_max": {"zh": "俯仰最大偏转角", "en": "Pitch Max Angle"},
+    "settings.plate_max": {"zh": "舵板最大偏转角", "en": "Plate Max Angle"},
     "settings.lost_hold": {"zh": "丢失保持时间", "en": "Lost Hold Time"},
     "settings.lost_neutral": {"zh": "丢失回中时间", "en": "Lost Neutral Time"},
     "settings.log_level": {"zh": "日志级别", "en": "Log Level"},
