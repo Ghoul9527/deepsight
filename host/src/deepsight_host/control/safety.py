@@ -12,8 +12,8 @@ logger = logging.getLogger("host.control.safety")
 
 class SafetyMonitor:
     def __init__(self,
-                 lost_hold_time: float = 0.5,
-                 lost_neutral_time: float = 2.0,
+                 lost_hold_time: float = 3.0,
+                 lost_neutral_time: float = 8.0,
                  neutral_pan: float = 90.0,
                  neutral_tilt: float = 90.0,
                  max_angle_step: float = 10.0):

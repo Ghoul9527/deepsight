@@ -27,6 +27,8 @@ class PIDController:
 
     def update(self, error: float, dt: float) -> float:
         if abs(error) < self.dead_zone:
+            self._integral = 0.0
+            self._prev_error = 0.0
             return 0.0
 
         self._integral += error * dt
@@ -56,3 +58,6 @@ class PIDController:
         self._integral = 0.0
         self._prev_error = 0.0
         self._initialized = False
+
+    def reset_integral(self):
+        self._integral = 0.0

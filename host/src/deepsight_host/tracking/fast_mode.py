@@ -27,7 +27,7 @@ class FastModeTracker(TrackingEngine):
                  model_name: str = "yolov8n.pt",
                  model_path: str = "",
                  inference_size: int = 640,
-                 motion_predict_ms: float = 1500):
+                 motion_predict_ms: float = 10000):
         self._conf = confidence_threshold
         self._iou = iou_threshold
         self._model_name = model_name
@@ -59,6 +59,7 @@ class FastModeTracker(TrackingEngine):
         self._vel_x: float = 0.0
         self._vel_y: float = 0.0
         self._lost_at: float | None = None
+        self._persistent_id: int = 1  # single-target: always same ID
 
         self._init_model()
 
@@ -102,6 +103,14 @@ class FastModeTracker(TrackingEngine):
             result = self._real_track(frame)
 
         self._latency_ms = (time.monotonic() - t0) * 1000.0
+
+        # Periodic MPS cache flush to prevent memory fragmentation
+        if self._frame_count % 300 == 0 and self._device == "mps":
+            try:
+                import torch
+                torch.mps.empty_cache()
+            except Exception:
+                pass
 
         # Adaptive frame skip when latency exceeds 1.5x frame budget
         frame_budget_ms = 1000 / 30
@@ -162,7 +171,6 @@ class FastModeTracker(TrackingEngine):
 
         idx = int(np.argmax(confs))
         bbox = r.boxes.xyxy[idx].cpu().numpy()
-        track_id = int(r.boxes.id[idx])
         conf = float(confs[idx])
 
         # Normalize to resized frame
@@ -207,7 +215,7 @@ class FastModeTracker(TrackingEngine):
             center_x=self._smooth_cx,
             center_y=self._smooth_cy,
             confidence=conf,
-            track_id=track_id,
+            track_id=self._persistent_id,
             visible=True,
             lost=False,
         )
@@ -237,7 +245,7 @@ class FastModeTracker(TrackingEngine):
             center_x=pred_cx,
             center_y=pred_cy,
             confidence=pred_conf,
-            track_id=getattr(self, '_last_result', None) and self._last_result.track_id or -1,
+            track_id=self._persistent_id,
             visible=False,
             lost=False,
         )
@@ -267,7 +275,7 @@ class FastModeTracker(TrackingEngine):
                   center_x + bbox_w / 2, center_y + bbox_h / 2),
             center_x=center_x, center_y=center_y,
             confidence=0.85 + 0.05 * math.sin(t * 0.7),
-            track_id=1, visible=True, lost=False,
+            track_id=self._persistent_id, visible=True, lost=False,
         )
 
     # ── properties ──────────────────────────────────────────────

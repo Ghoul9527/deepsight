@@ -101,6 +101,20 @@ class SettingsDialog(QDialog):
         self._iou_thresh.setDecimals(2)
         trk_layout.addRow(tr("settings.iou"), self._iou_thresh)
 
+        self._pos_deadband = QDoubleSpinBox()
+        self._pos_deadband.setRange(0.0, 0.5)
+        self._pos_deadband.setSingleStep(0.001)
+        self._pos_deadband.setDecimals(3)
+        self._pos_deadband.setToolTip(tr("settings.pos_deadband_tip"))
+        trk_layout.addRow(tr("settings.pos_deadband"), self._pos_deadband)
+
+        self._out_ema = QDoubleSpinBox()
+        self._out_ema.setRange(0.01, 1.0)
+        self._out_ema.setSingleStep(0.05)
+        self._out_ema.setDecimals(2)
+        self._out_ema.setToolTip(tr("settings.out_ema_tip"))
+        trk_layout.addRow(tr("settings.out_ema"), self._out_ema)
+
         self._tabs.addTab(self._tracking_tab, tr("settings.tab_tracking"))
 
         # ── Control tab ──
@@ -249,6 +263,8 @@ class SettingsDialog(QDialog):
         self._tracking_mode.setCurrentText(c.tracking_mode)
         self._confidence_thresh.setValue(c.confidence_threshold)
         self._iou_thresh.setValue(c.iou_threshold)
+        self._pos_deadband.setValue(c.pos_deadband)
+        self._out_ema.setValue(c.out_ema_alpha)
 
         self._pid_p.setValue(c.pid_p)
         self._pid_i.setValue(c.pid_i)
@@ -284,6 +300,8 @@ class SettingsDialog(QDialog):
         c.tracking_mode = self._tracking_mode.currentText()
         c.confidence_threshold = self._confidence_thresh.value()
         c.iou_threshold = self._iou_thresh.value()
+        c.pos_deadband = self._pos_deadband.value()
+        c.out_ema_alpha = self._out_ema.value()
 
         # Control
         c.pid_p = self._pid_p.value()
@@ -357,6 +375,8 @@ class SettingsDialog(QDialog):
                 "pid_d": c.pid_d,
                 "max_servo_speed": c.max_servo_speed,
                 "dead_zone": c.dead_zone,
+                "pos_deadband": c.pos_deadband,
+                "out_ema_alpha": c.out_ema_alpha,
             },
             "gimbal": {
                 "yaw_max_angle": c.gimbal_yaw_max_angle,
@@ -394,6 +414,8 @@ class SettingsDialog(QDialog):
         self._pid_d.setValue(0.2)
         self._max_servo_speed.setValue(60.0)
         self._dead_zone.setValue(0.02)
+        self._pos_deadband.setValue(0.005)
+        self._out_ema.setValue(0.75)
         self._neutral_angle.setValue(90.0)
         self._gimbal_yaw_max.setValue(15.0)
         self._gimbal_pitch_max.setValue(15.0)

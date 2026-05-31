@@ -40,6 +40,7 @@ class DepthChartWidget(QWidget):
         self._dives: list[DiveProfile] = []
         self._current_points: list[tuple[float, float]] = []
         self._session_start: float | None = None
+        self._last_paint = 0.0
         self._margin_left = 44
         self._margin_right = 16
         self._margin_top = 10
@@ -52,6 +53,7 @@ class DepthChartWidget(QWidget):
         self._session_start = time.monotonic()
         self._dives.clear()
         self._current_points.clear()
+        self._last_paint = 0.0
         self.update()
 
     def record_depth(self, depth_m: float):
@@ -62,6 +64,10 @@ class DepthChartWidget(QWidget):
         if t > MAX_TIME_S:
             return
         self._current_points.append((t, depth_m))
+        now = time.monotonic()
+        if now - self._last_paint > 0.2:  # throttle to ~5 Hz
+            self._last_paint = now
+            self.update()
 
     def start_dive(self):
         self._current_points.clear()
@@ -173,11 +179,11 @@ class DepthChartWidget(QWidget):
             return
 
         dive_colors = [
-            QColor(0, 220, 140),   # teal
-            QColor(80, 180, 255),  # light blue
-            QColor(255, 180, 60),  # orange
-            QColor(220, 80, 220),  # magenta
-            QColor(255, 255, 80),  # yellow
+            QColor(30, 80, 200),    # dark blue
+            QColor(40, 100, 220),   # medium blue
+            QColor(50, 120, 180),   # steel blue
+            QColor(60, 100, 200),   # slate blue
+            QColor(40, 90, 190),    # navy blue
         ]
 
         def to_plot(t_s: float, d_m: float) -> QPointF:
@@ -209,7 +215,7 @@ class DepthChartWidget(QWidget):
 
         # Current in-progress dive
         if self._current_points and len(self._current_points) >= 2:
-            pen = QPen(QColor(255, 80, 80), 2)
+            pen = QPen(QColor(30, 80, 200), 2)
             painter.setPen(pen)
             path = QPainterPath()
             pt = to_plot(*self._current_points[0])

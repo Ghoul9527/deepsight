@@ -17,6 +17,8 @@ class DashboardWidget(QWidget):
         super().__init__(parent)
         self._values: dict[str, float] = {}
         self._labels: dict[str, QLabel] = {}
+        self._units: dict[str, str] = {}
+        self._metric_keys: dict[str, str] = {}  # key → i18n key for short label
         self._key_labels: dict[str, QLabel] = {}
         self._i18n = I18n.instance()
         self._setup_ui()
@@ -58,17 +60,11 @@ class DashboardWidget(QWidget):
         self._add_metric(grid, 4, 2, "cambay_temp", "°C")
         self._add_metric(grid, 4, 3, "cambay_humidity", "%")
 
-        # Row 5: Environment
-        self._add_cell(grid, 5, 0, "dashboard.env")
-        self._add_metric(grid, 5, 1, "env_temp", "°C")
-        self._add_metric(grid, 5, 2, "humidity", "%")
-        self._add_metric(grid, 5, 3, "env_pressure", "hPa")
-
-        # Row 6: Tracking
-        self._add_cell(grid, 6, 0, "dashboard.tracking_title")
-        self._add_metric(grid, 6, 1, "confidence", "%")
-        self._add_metric(grid, 6, 2, "target_x", "")
-        self._add_metric(grid, 6, 3, "target_y", "")
+        # Row 5: Tracking
+        self._add_cell(grid, 5, 0, "dashboard.tracking_title")
+        self._add_metric(grid, 5, 1, "confidence", "%")
+        self._add_metric(grid, 5, 2, "target_x", "")
+        self._add_metric(grid, 5, 3, "target_y", "")
 
         root.addLayout(grid)
 
@@ -87,34 +83,48 @@ class DashboardWidget(QWidget):
         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         grid.addWidget(label, row, col)
         self._labels[key] = label
+        self._units[key] = unit
+        self._metric_keys[key] = f"metric.{key}"
 
     def _retranslate(self, _lang: str = ""):
         for i18n_key, label in self._key_labels.items():
             label.setText(tr(i18n_key))
+        # Re-render all values with new language labels
+        for key, value in self._values.items():
+            self._render_value(key, value)
 
     def update_value(self, key: str, value):
         self._values[key] = value
-        if key in self._labels:
-            if isinstance(value, float):
-                if key in ("target_x", "target_y"):
-                    text = f"{value:.4f}"
-                elif key == "confidence":
-                    text = f"{value * 100:.0f}"
-                elif key in ("yaw", "pitch", "roll", "water_temp",
-                             "ebay_temp", "cambay_temp", "env_temp"):
-                    text = f"{value:.1f}"
-                elif key in ("depth", "lux"):
-                    text = f"{value:.1f}"
-                elif key in ("pressure", "ebay_pressure", "cambay_pressure",
-                             "env_pressure"):
-                    text = f"{value:.0f}"
-                elif key in ("humidity", "ebay_humidity", "cambay_humidity"):
-                    text = f"{value:.0f}"
-                else:
-                    text = f"{value:.2f}"
+        self._render_value(key, value)
+
+    def _render_value(self, key: str, value):
+        if key not in self._labels:
+            return
+        if isinstance(value, float):
+            if key in ("target_x", "target_y"):
+                num = f"{value:.4f}"
+            elif key == "confidence":
+                num = f"{value * 100:.0f}"
+            elif key in ("yaw", "pitch", "roll", "water_temp",
+                         "ebay_temp", "cambay_temp", "env_temp"):
+                num = f"{value:.1f}"
+            elif key in ("depth", "lux"):
+                num = f"{value:.1f}"
+            elif key in ("pressure", "ebay_pressure", "cambay_pressure",
+                         "env_pressure"):
+                num = f"{value:.0f}"
+            elif key in ("humidity", "ebay_humidity", "cambay_humidity"):
+                num = f"{value:.0f}"
             else:
-                text = str(value)
-            self._labels[key].setText(text)
+                num = f"{value:.2f}"
+        else:
+            num = str(value)
+
+        label_key = self._metric_keys.get(key, "")
+        metric_name = tr(label_key) if label_key else key
+        unit = self._units.get(key, "")
+        text = f"{metric_name}: {num}{unit}"
+        self._labels[key].setText(text)
 
     def update_imu(self, yaw: float, pitch: float, roll: float):
         self.update_value("yaw", yaw)

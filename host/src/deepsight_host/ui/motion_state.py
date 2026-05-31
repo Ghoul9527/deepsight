@@ -29,10 +29,10 @@ class MotionStateWidget(QWidget):
     speed_changed = Signal(float)
     depth_changed = Signal(float)
 
-    _T_DESCEND = 60.0
+    _T_DESCEND = 127.0   # 2 min 7 sec
     _T_HOVER = 2.0
-    _T_ASCEND = 60.0
-    _MAX_DEPTH = 50.0
+    _T_ASCEND = 90.0    # 1 min 30 sec
+    _MAX_DEPTH = 130.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -41,6 +41,7 @@ class MotionStateWidget(QWidget):
         self._depth_m = 0.0
         self._mock_enabled = True
         self._phase_elapsed = 0.0
+        self._prev_emitted_state: str | None = None
 
         self._i18n = I18n.instance()
         self._i18n.language_changed.connect(self._on_lang_changed)
@@ -169,12 +170,19 @@ class MotionStateWidget(QWidget):
         self._mock_label.setVisible(self._mock_enabled)
         self._mock_label.setText(tr("motion.mock_hint"))
 
+        if self._state != self._prev_emitted_state:
+            self._prev_emitted_state = self._state
+            self.state_changed.emit(self._state)
+        self.speed_changed.emit(self._speed_ms)
+        self.depth_changed.emit(self._depth_m)
+
     def start_mock(self):
         self._mock_enabled = True
         self._phase_elapsed = 0.0
         self._state = "descending"
         self._depth_m = 0.0
         self._speed_ms = self._MAX_DEPTH / self._T_DESCEND
+        self._prev_emitted_state = None
         self._timer.start()
 
     def stop_mock(self):

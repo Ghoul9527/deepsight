@@ -28,7 +28,7 @@ class PreciseModeTracker(TrackingEngine):
                  model_name: str = "yolov8s.pt",
                  model_path: str = "",
                  inference_size: int = 960,
-                 motion_predict_ms: float = 2000):
+                 motion_predict_ms: float = 10000):
         self._conf = confidence_threshold
         self._iou = iou_threshold
         self._model_name = model_name

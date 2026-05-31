@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
 
         self._i18n = I18n.instance()
         self._sizes_set = False
+        self._gimbal_mode = "AUTO"
         self._setup_ui()
         self._connect_gopro_signals()
         self._connect_i18n()
@@ -89,6 +90,20 @@ class MainWindow(QMainWindow):
         self._safety_header_label.setStyleSheet("color: #8888cc; font-size: 11px;")
         top.addWidget(self._safety_header_label)
         top.addWidget(self._safety_label)
+
+        top.addSpacing(12)
+
+        self._mode_header_label = QLabel(tr("status.gimbal_mode") + ":")
+        self._mode_header_label.setStyleSheet("color: #8888cc; font-size: 11px;")
+        top.addWidget(self._mode_header_label)
+
+        self._mode_label = QLabel()
+        self._mode_label.setStyleSheet(
+            "font-weight: bold; font-size: 11px; padding: 1px 6px; "
+            "border-radius: 3px;"
+        )
+        top.addWidget(self._mode_label)
+        self._update_mode_label()
 
         top.addSpacing(12)
 
@@ -368,6 +383,7 @@ class MainWindow(QMainWindow):
         self._lang_btn.setText(tr("lang.switch"))
         self._status_bar.showMessage(tr("app.ready"))
         self._safety_header_label.setText(tr("app.safety") + ":")
+        self._mode_header_label.setText(tr("status.gimbal_mode") + ":")
         self._safety_label.setText(tr(f"safety.{self._current_safety}"))
         self._lock_label.setText(tr(f"safety.{'locked' if self._current_safety == 'locked' else 'unlocked'}"))
         self._e_stop_btn.setText(tr("safety.e_stop"))
@@ -378,6 +394,7 @@ class MainWindow(QMainWindow):
         self._presets_action.setText(tr("menu.gopro_presets"))
         self._gopro_action.setText(tr("menu.gopro_control"))
         self._media_action.setText(tr("menu.album_media"))
+        self._update_mode_label()
 
     def changeEvent(self, event):
         if event.type() == QEvent.WindowStateChange:
@@ -434,6 +451,27 @@ class MainWindow(QMainWindow):
 
     def set_gamepad_connected(self, connected: bool, info: str = ""):
         self._component_status.update_gamepad(connected, info)
+
+    def set_gimbal_mode(self, mode: str):
+        """mode is 'AUTO' or 'MANUAL'."""
+        self._gimbal_mode = mode
+        self._update_mode_label()
+
+    def _update_mode_label(self):
+        mode_text = tr(f"status.mode_{self._gimbal_mode.lower()}")
+        self._mode_label.setText(mode_text)
+        if self._gimbal_mode == "AUTO":
+            self._mode_label.setStyleSheet(
+                "font-weight: bold; font-size: 11px; padding: 1px 8px; "
+                "border-radius: 3px; "
+                "background-color: #224422; color: #44cc88;"
+            )
+        else:
+            self._mode_label.setStyleSheet(
+                "font-weight: bold; font-size: 11px; padding: 1px 8px; "
+                "border-radius: 3px; "
+                "background-color: #444422; color: #ccaa44;"
+            )
 
     def set_safety_state(self, state: str, color: str):
         self._current_safety = state

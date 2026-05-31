@@ -21,6 +21,7 @@ from deepsight_host.network.ws_link import WsLink
 from deepsight_host.network.node_registry import NodeRegistry
 from deepsight_host.network.message_bus import MessageBus
 from deepsight_host.tracking.registry import get_tracker
+from deepsight_host.video.file_source import FileVideoSource
 from deepsight_host.video.no_video_source import NoVideoSource
 from deepsight_host.video.stream_receiver import StreamReceiver
 from deepsight_host.control.framer import Framer
@@ -33,15 +34,22 @@ from deepsight_host.diagnostics.startup_check import StartupCheck
 from deepsight_host.gopro import GoProClient
 from deepsight_host.ui.i18n import tr
 
+from enum import Enum
+
 from deepsight_shared.protocol import (
     make_heartbeat, cmd_servo_set, cmd_winch_set, sys_safety, sys_ping,
     cmd_startup_check, Message,
 )
 
+
+class GimbalMode(Enum):
+    AUTO = "auto"      # YOLO controls gimbal
+    MANUAL = "manual"  # Gamepad controls gimbal
+
 logger = logging.getLogger("host.app")
 
-TRACKING_COLORS = [(0, 255, 0), (255, 255, 0), (255, 0, 255), (0, 255, 255),
-                   (255, 128, 0), (128, 255, 0), (0, 128, 255)]
+# BGR orange — single target, visible against blue-green ocean
+TRACKING_COLOR = (0, 140, 255)
 
 
 class HostApp:
@@ -80,13 +88,17 @@ class HostApp:
         # Thread-safe queue for incoming telemetry (async → Qt main thread)
         self._incoming_queue: queue.Queue[Message] = queue.Queue()
 
-        # Video source: real stream from Pi, or black "No Signal" placeholder
+        # Video source: mock file → real stream → no-signal placeholder
         self._no_signal_source = NoVideoSource(
             self.config.frame_width,
             self.config.frame_height,
             self.config.fps,
         )
-        if self.config.stream_url:
+        if self.config.mock_enabled and self.config.mock_video_source == "file":
+            logger.info("Using mock video file: %s", self.config.mock_video_file)
+            self._video_source = FileVideoSource(
+                self.config.mock_video_file, fps=self.config.fps)
+        elif self.config.stream_url:
             logger.info("Using video stream: %s", self.config.stream_url)
             self._video_source = StreamReceiver(self.config.stream_url)
         else:
@@ -100,11 +112,19 @@ class HostApp:
             model_path=self.config.model_path,
         )
 
-        # Control pipeline
+        # Control pipeline — tuned PID for smooth gimbal tracking
+        from deepsight_host.control.pid import PIDGains
+        pid_gains = PIDGains(p=0.6, i=0.03, d=0.05)
         self._framer = Framer(
-            servo_mapper=ServoMapper(),
-            pid_pan=PIDController(),
-            pid_tilt=PIDController(),
+            servo_mapper=ServoMapper(
+                pan_range=self.config.gimbal_yaw_max_angle,
+                tilt_range=self.config.gimbal_pitch_max_angle,
+                invert_pan=True,
+            ),
+            pid_pan=PIDController(gains=pid_gains, dead_zone=0.02),
+            pid_tilt=PIDController(gains=pid_gains, dead_zone=0.02),
+            pos_deadband=self.config.pos_deadband,
+            out_ema_alpha=self.config.out_ema_alpha,
         )
 
         # Game controller input
@@ -145,15 +165,35 @@ class HostApp:
         self._servo_min_interval = 0.02   # seconds — cap at 50 Hz per servo
         self._servo_seq = 0              # sequence number for timecode tracing
 
+        # Gimbal control state machine — per-axis manual flags
+        self._gimbal_mode = GimbalMode.AUTO
+        self._pan_manual = False    # True: gamepad yaw stick off-center
+        self._tilt_manual = False   # True: gamepad pitch stick off-center
+
+        # Overlay diagnostics — track which path _draw_overlay takes each frame
+        self._overlay_stats = {"visible": 0, "kalman": 0, "lost": 0, "none": 0}
+        self._overlay_log_interval = 90  # log every ~3s at 30fps
+
         # Winch command rate-limiting
         self._last_winch_speed: float | None = None
         self._last_winch_direction: str | None = None
+
+        # Motion state tracking for depth chart lifecycle
+        self._prev_motion_state: str = "descending"
 
         # Performance tracking
         self._frame_count = 0
         self._fps_ema = 0.0
         self._last_fps_update = time.monotonic()
         self._pi_stream_latency_ms: float = 0.0  # PCR-based GoPro→Pi latency
+
+        # Gimbal mode label init
+        self._window.set_gimbal_mode("AUTO")
+
+        # Motion state → depth chart (mock V-profile)
+        self._window.motion_state.state_changed.connect(self._on_motion_state_changed)
+        self._window.motion_state.depth_changed.connect(
+            self._window.depth_chart.record_depth)
 
         # Timers
         self._frame_timer = QTimer()
@@ -189,10 +229,8 @@ class HostApp:
         # Analog axes
         self._controller.winch_speed_changed.connect(self._on_winch_speed)
         self._controller.plate_yaw_changed.connect(self._on_fin_steer)
-        self._controller.gimbal_pitch_changed.connect(
-            lambda v: (self._send_servo(1, float(v)), self._window.gimbal_deflection.set_tilt(v)))
-        self._controller.gimbal_yaw_changed.connect(
-            lambda v: (self._send_servo(0, float(v)), self._window.gimbal_deflection.set_pan(v)))
+        self._controller.gimbal_pitch_changed.connect(self._on_gimbal_pitch)
+        self._controller.gimbal_yaw_changed.connect(self._on_gimbal_yaw)
         self._controller.light_level_changed.connect(self._on_light_level)
         self._controller.roll_trim_changed.connect(self._on_roll_trim)
 
@@ -253,6 +291,9 @@ class HostApp:
         self._window.set_lock_state(True)  # initial lock overlay
         self._recorder.start()
         self._update_tracking_status()
+
+        # Delay fullscreen to let window fully settle
+        QTimer.singleShot(500, self._window.showFullScreen)
 
         # Start startup self-check (delayed, let network settle)
         QTimer.singleShot(1000, self._startup_check.start)
@@ -400,8 +441,11 @@ class HostApp:
             result = None
             track_latency = 0.0
 
-        # Draw overlay on frame
-        self._draw_overlay(frame, result)
+        # Draw overlay on frame — use Kalman-predicted position during loss
+        kalman_pos = self._framer.predicted_position if (
+            self._tracker is not None
+        ) else None
+        self._draw_overlay(frame, result, kalman_pos)
 
         # End-to-end latency estimate (ms)
         #   GoPro→Pi:    210ms FAQ baseline + PCR delta
@@ -409,10 +453,10 @@ class HostApp:
         #   Host→screen: frame_age_ms (ffmpeg decode + Qt display gap)
         ee_latency = 210.0 + self._pi_stream_latency_ms + self._video_source.frame_age_ms()
 
-        # Control: compute servo angles (only when target is actually visible)
-        if result is not None and result.visible and not result.lost:
+        # Control: always pass result to framer — it uses Kalman prediction when
+        # target is temporarily lost for smooth, continuous gimbal motion.
+        if result is not None:
             angles = self._framer.process(result)
-            # Record tracking result
             self._recorder.record_tracking(
                 track_id=result.track_id,
                 confidence=result.confidence,
@@ -427,6 +471,17 @@ class HostApp:
                 track_id=-1, confidence=0.0,
                 center_x=0.5, center_y=0.5, lost=True,
             )
+
+        # Gimbal control: per-axis AUTO/MANUAL mode
+        #   AUTO:  YOLO controls that axis (unless gamepad overrides)
+        #   MANUAL: only gamepad controls, YOLO commands ignored
+        if self._gimbal_mode == GimbalMode.AUTO and result is not None:
+            if not self._pan_manual:
+                self._window.gimbal_deflection.set_pan(angles.pan)
+                self._send_servo(0, angles.pan)
+            if not self._tilt_manual:
+                self._window.gimbal_deflection.set_tilt(angles.tilt)
+                self._send_servo(1, angles.tilt)
 
         # Update video display (with end-to-end latency)
         self._window.video_preview.update_frame(frame, self._fps_ema, ee_latency)
@@ -463,14 +518,7 @@ class HostApp:
                 tilt=angles.tilt,
             )
 
-        # Update gimbal display and send servo commands only when tracking a visible target.
-        # Otherwise manual stick input owns both the display and the servos.
-        if result is not None and result.visible and not result.lost:
-            self._window.gimbal_deflection.set_angles(angles.pan, angles.tilt)
-            self._send_servo(0, angles.pan)
-            self._send_servo(1, angles.tilt)
-
-    def _draw_overlay(self, frame: np.ndarray, result):
+    def _draw_overlay(self, frame: np.ndarray, result, kalman_pos=None):
         h, w = frame.shape[:2]
         cv2 = _cv2()
 
@@ -480,32 +528,75 @@ class HostApp:
             cv2.line(frame, (cx - 20, cy), (cx + 20, cy), (100, 100, 100), 1)
             cv2.line(frame, (cx, cy - 20), (cx, cy + 20), (100, 100, 100), 1)
 
-        if result is None or not result.visible:
-            if result is not None and result.lost:
-                _draw_text_cjk(frame, tr("tracking.target_lost"),
-                               (10, 60), (0, 0, 255), 30)
-            else:
-                _draw_text_cjk(frame, tr("tracking.no_tracking"),
-                               (10, 60), (100, 100, 100), 30)
+        if result is not None and result.visible:
+            # Real detection — draw bounding box at detected position
+            self._overlay_stats["visible"] += 1
+            bx1 = int(result.bbox[0] * w)
+            by1 = int(result.bbox[1] * h)
+            bx2 = int(result.bbox[2] * w)
+            by2 = int(result.bbox[3] * h)
+            color = TRACKING_COLOR
+
+            if cv2:
+                cv2.rectangle(frame, (bx1, by1), (bx2, by2), color, 2)
+                label = f"Diver {result.confidence:.2f}"
+                cv2.putText(frame, label, (bx1, max(by1 - 8, 15)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+                cpx = int(result.center_x * w)
+                cpy = int(result.center_y * h)
+                cv2.circle(frame, (cpx, cpy), 4, color, -1)
+            self._log_overlay_stats()
             return
 
-        # Bounding box
-        bx1 = int(result.bbox[0] * w)
-        by1 = int(result.bbox[1] * h)
-        bx2 = int(result.bbox[2] * w)
-        by2 = int(result.bbox[3] * h)
-        color = TRACKING_COLORS[result.track_id % len(TRACKING_COLORS)]
+        # No detection — use Kalman prediction to maintain the box.
+        # The Kalman always provides a position: post-update (last known) or
+        # post-predict (extrapolated). Both are better than showing text.
+        if kalman_pos is not None:
+            self._overlay_stats["kalman"] += 1
+            px, py = kalman_pos
+            # Use last known bbox size from tracker result or fallback
+            if result is not None and result.bbox:
+                bw = (result.bbox[2] - result.bbox[0])
+                bh = (result.bbox[3] - result.bbox[1])
+            else:
+                bw, bh = 0.08, 0.12  # fallback size
+            bx1 = int((px - bw / 2) * w)
+            by1 = int((py - bh / 2) * h)
+            bx2 = int((px + bw / 2) * w)
+            by2 = int((py + bh / 2) * h)
+            if cv2:
+                cv2.rectangle(frame, (bx1, by1), (bx2, by2), TRACKING_COLOR, 2)
+                label = "Diver_P"
+                cv2.putText(frame, label, (bx1, max(by1 - 8, 15)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, TRACKING_COLOR, 2)
+                cpx = int(px * w)
+                cpy = int(py * h)
+                cv2.circle(frame, (cpx, cpy), 4, TRACKING_COLOR, -1)
+            self._log_overlay_stats()
+            return
 
-        if cv2:
-            cv2.rectangle(frame, (bx1, by1), (bx2, by2), color, 2)
-            label = f"ID:{result.track_id} {result.confidence:.2f}"
-            cv2.putText(frame, label, (bx1, max(by1 - 8, 15)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        # Fallback: fully lost, no Kalman data yet
+        if result is not None and result.lost:
+            self._overlay_stats["lost"] += 1
+            _draw_text_cjk(frame, tr("tracking.target_lost"),
+                           (10, 60), (0, 0, 255), 30)
+        else:
+            self._overlay_stats["none"] += 1
+            _draw_text_cjk(frame, tr("tracking.no_tracking"),
+                           (10, 60), (100, 100, 100), 30)
+        self._log_overlay_stats()
 
-            # Center point
-            cpx = int(result.center_x * w)
-            cpy = int(result.center_y * h)
-            cv2.circle(frame, (cpx, cpy), 4, color, -1)
+    def _log_overlay_stats(self):
+        total = sum(self._overlay_stats.values())
+        if total > 0 and total % self._overlay_log_interval == 0:
+            s = self._overlay_stats
+            logger.info(
+                "Overlay[%d]: visible=%d kalman=%d lost=%d none=%d "
+                "(%.1f%% kalman coverage on loss)",
+                total, s["visible"], s["kalman"], s["lost"], s["none"],
+                s["kalman"] / max(s["kalman"] + s["lost"], 1) * 100)
+            self._overlay_stats = {"visible": 0, "kalman": 0, "lost": 0, "none": 0}
 
     def _send_heartbeat(self):
         self._registry.heartbeat("host")
@@ -602,6 +693,18 @@ class HostApp:
 
     # ── Game controller action handlers ──
 
+    def _on_motion_state_changed(self, state: str):
+        """Track motion state transitions for depth chart V-profile lifecycle."""
+        prev = self._prev_motion_state
+        self._prev_motion_state = state
+
+        if state == "descending":
+            # New cycle begins — clear previous V-profile
+            self._window.depth_chart.start_session()
+        elif state == "hovering" and prev == "ascending":
+            # Cycle complete (top hover after ascending) — archive the V
+            self._window.depth_chart.end_dive(130.0)
+
     def _on_winch_speed(self, speed: float):
         """Winch speed from left stick Y. Positive = reel in (ascend)."""
         direction = "up" if speed > 0 else "down" if speed < 0 else "stop"
@@ -666,6 +769,28 @@ class HostApp:
         self._send_servo(1, 90.0)
         self._window.gimbal_deflection.set_angles(90.0, 90.0)
 
+    def _on_gimbal_pitch(self, angle: float):
+        """Gamepad right stick Y → gimbal pitch. Manual input overrides YOLO."""
+        if abs(angle - 90.0) > 1.0:
+            self._tilt_manual = True
+            self._gimbal_mode = GimbalMode.MANUAL
+            self._window.set_gimbal_mode("MANUAL")
+            self._window.gimbal_deflection.set_tilt(angle)
+            self._send_servo(1, angle)
+        else:
+            self._tilt_manual = False
+
+    def _on_gimbal_yaw(self, angle: float):
+        """Gamepad right stick X → gimbal yaw. Manual input overrides YOLO."""
+        if abs(angle - 90.0) > 1.0:
+            self._pan_manual = True
+            self._gimbal_mode = GimbalMode.MANUAL
+            self._window.set_gimbal_mode("MANUAL")
+            self._window.gimbal_deflection.set_pan(angle)
+            self._send_servo(0, angle)
+        else:
+            self._pan_manual = False
+
     def _on_all_recenter(self):
         """Logo: all recenter — body, gimbal, winch to neutral."""
         logger.info("All recenter")
@@ -674,11 +799,19 @@ class HostApp:
         self._on_roll_recenter()
 
     def _on_tracking_toggle(self):
-        """RB: toggle auto-tracking on/off."""
-        if self.config.tracking_mode != "off":
-            self._switch_tracking_mode("off")
+        """RB: toggle AUTO ↔ MANUAL gimbal control mode."""
+        if self._gimbal_mode == GimbalMode.AUTO:
+            self._gimbal_mode = GimbalMode.MANUAL
+            self._pan_manual = False
+            self._tilt_manual = False
+            self._window.set_gimbal_mode("MANUAL")
+            logger.info("Gimbal mode: MANUAL (gamepad)")
         else:
-            self._switch_tracking_mode("fast")
+            self._gimbal_mode = GimbalMode.AUTO
+            self._pan_manual = False
+            self._tilt_manual = False
+            self._window.set_gimbal_mode("AUTO")
+            logger.info("Gimbal mode: AUTO (YOLO)")
 
     def _on_record_toggle(self):
         """B: toggle recording on/off."""

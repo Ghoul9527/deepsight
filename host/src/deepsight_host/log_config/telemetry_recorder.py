@@ -133,5 +133,19 @@ class TelemetryRecorder:
                          self._entry_count, self.elapsed, self._path)
 
     def _write_line(self, data: dict):
-        self._file.write(json.dumps(data) + "\n")
-        self._file.flush()
+        self._file.write(json.dumps(data, default=_json_default) + "\n")
+
+
+def _json_default(obj):
+    """Convert numpy scalars to Python native types for JSON serialization."""
+    try:
+        import numpy as np
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+    except ImportError:
+        pass
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")

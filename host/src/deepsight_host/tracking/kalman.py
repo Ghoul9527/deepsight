@@ -19,8 +19,8 @@ class KalmanPredictor:
     def _init_filter(dt: float, q: float, r: float):
         return {"dt": dt, "q": q, "r": r, "x": np.zeros(4), "P": np.eye(4) * 1000}
 
-    def predict(self) -> tuple[float, float]:
-        dt = self.dt
+    def predict(self, dt: float | None = None) -> tuple[float, float]:
+        dt = dt if dt is not None else self.dt
         x = self._kf["x"]
         P = self._kf["P"]
         q = self._kf["q"]
@@ -30,7 +30,7 @@ class KalmanPredictor:
                        [0, 1, 0, dt],
                        [0, 0, 1, 0],
                        [0, 0, 0, 1]])
-        Q = np.eye(4) * q
+        Q = np.eye(4) * q * (dt / self.dt)
 
         x = F @ x
         P = F @ P @ F.T + Q

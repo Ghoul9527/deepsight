@@ -34,6 +34,7 @@ class HostConfig:
         m = data.get("mock", {})
         self.mock_enabled: bool = m.get("enabled", True)
         self.mock_video_source: str = m.get("video_source", "test_pattern")
+        self.mock_video_file: str = m.get("video_file", "")
         self.mock_tracking_target: str = m.get("tracking_target", "synthetic")
         self.frame_width: int = m.get("frame_width", 1280)
         self.frame_height: int = m.get("frame_height", 720)
@@ -86,6 +87,8 @@ class HostConfig:
         self.pid_d: float = c.get("pid_d", 0.2)
         self.max_servo_speed: float = c.get("max_servo_speed", 15.0)
         self.dead_zone: float = c.get("dead_zone", 0.02)
+        self.pos_deadband: float = c.get("pos_deadband", 0.005)
+        self.out_ema_alpha: float = c.get("out_ema_alpha", 0.75)
 
         gi = data.get("gimbal", {})
         self.gimbal_yaw_max_angle: float = gi.get("yaw_max_angle", 15.0)
