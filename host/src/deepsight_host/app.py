@@ -142,7 +142,7 @@ class HostApp:
         self._last_sent_angles: dict[int, float] = {}
         self._last_sent_time: dict[int, float] = {}
         self._servo_deadband = 0.3       # degrees — suppress sub-degree jitter
-        self._servo_min_interval = 0.025  # seconds — cap at 40 Hz per servo
+        self._servo_min_interval = 0.02   # seconds — cap at 50 Hz per servo
         self._servo_seq = 0              # sequence number for timecode tracing
 
         # Winch command rate-limiting

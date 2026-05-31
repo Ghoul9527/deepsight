@@ -27,7 +27,7 @@ class MessageRouter:
         # Coalesced servo commands: only the latest angle per servo is kept
         self._servo_buf: dict[int, Message] = {}
         self._lighting_buf: Message | None = None
-        self._send_interval = 0.025  # 40 Hz flush rate
+        self._send_interval = 0.02   # 50 Hz flush rate
 
     async def start(self):
         self._running = True

@@ -1,0 +1,5 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/Tony/Documents/workspace/deepsight/scripts/GCControllerBridge.app/Contents/MacOS/gc_bridge'
+relocations:     []
+...
