@@ -135,6 +135,10 @@ class Framer:
     def is_predicting(self) -> bool:
         return self._kalman._steps_since_update > 0
 
+    @property
+    def safety_state(self):
+        return self._safety.state
+
     def reset(self):
         self._kalman.reset()
         self._smoother.reset()

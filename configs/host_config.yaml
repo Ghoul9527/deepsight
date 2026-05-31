@@ -9,8 +9,9 @@ network:
 video:
   stream_url: udp://0.0.0.0:8554
 mock:
-  enabled: true
+  enabled: false
   video_source: file
+  video_file: "/Users/Tony/Downloads/deepsight_yolo_test/cwt_123m_edit.mov"
   tracking_target: none
   frame_width: 854
   frame_height: 480
@@ -27,7 +28,7 @@ control:
   max_servo_speed: 15.0
   dead_zone: 0.02
   pos_deadband: 0.005
-  out_ema_alpha: 0.75
+  out_ema_alpha: 0.5
 gimbal:
   yaw_max_angle: 15.0
   pitch_max_angle: 15.0
@@ -41,3 +42,40 @@ logging:
   level: DEBUG
   dir: logs/host/
   telemetry_record: false
+
+controller:
+  poll_hz: 50
+  dead_zone: 0.08
+  smoothing_alpha: 0.4
+  max_winch_speed: 100
+  max_servo_speed: 15
+  sensitivity_step: 0.1
+  sensitivity_min: 0.2
+  sensitivity_max: 2.0
+  mappings:
+    generic:
+      name_patterns: []
+      axes:
+        winch: {axis: 1, invert: false}
+        plate_yaw: {axis: 0, invert: false}
+        gimbal_pitch: {axis: 3, invert: false}
+        gimbal_yaw: {axis: 2, invert: true}
+      buttons:
+        drop_to_3m: 4
+        body_recenter: 8
+        gimbal_recenter: 9
+        all_recenter: 10
+        tracking: 5
+        record: 1
+        hud: 2
+        roll_recenter: 3
+        preset: 0
+        e_stop: 6
+        lock: 7
+        light_down: 11
+        light_up: 12
+      dpad:
+        winch_sens_up: [0, 1]
+        winch_sens_down: [0, -1]
+        plate_sens_left: [-1, 0]
+        plate_sens_right: [1, 0]

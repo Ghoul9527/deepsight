@@ -11,10 +11,8 @@ _translations: dict[str, dict[str, str]] = {
     "app.ready": {"zh": "就绪", "en": "Ready"},
     "app.running": {"zh": "运行中 | %s | %s", "en": "Running | %s | %s"},
     "app.emu_stop_msg": {"zh": "紧急停止 — 所有电机已停止", "en": "EMERGENCY STOP — all motors halted"},
-    "app.node_state": {"zh": "节点 %s: %s → %s", "en": "Node %s: %s → %s"},
 
     "tab.dashboard": {"zh": "仪表盘", "en": "Dashboard"},
-    "tab.nodes": {"zh": "节点", "en": "Nodes"},  # LEGACY
     "tab.components": {"zh": "组件", "en": "Components"},
     "tab.tracking": {"zh": "追踪", "en": "Tracking"},
     "tab.controls": {"zh": "控制", "en": "Controls"},
@@ -32,17 +30,6 @@ _translations: dict[str, dict[str, str]] = {
     "safety.locked": {"zh": "已锁定", "en": "LOCKED"},
     "safety.unlocked": {"zh": "已解锁", "en": "UNLOCKED"},
 
-    "node.host": {"zh": "主机", "en": "Host"},  # LEGACY
-    "node.pi": {"zh": "水下网关", "en": "UW Gateway"},  # LEGACY
-    "node.pico": {"zh": "控制器", "en": "Controller"},  # LEGACY
-    "node.stm32": {"zh": "绞车驱动", "en": "Winch Driver"},  # LEGACY
-    "node.gopro": {"zh": "相机模组", "en": "Camera"},  # LEGACY
-    "node.state_healthy": {"zh": "正常", "en": "Healthy"},  # LEGACY
-    "node.state_degraded": {"zh": "降级", "en": "Degraded"},  # LEGACY
-    "node.state_lost": {"zh": "失联", "en": "Lost"},  # LEGACY
-    "node.state_unknown": {"zh": "未知", "en": "Unknown"},  # LEGACY
-    "node.state_offline": {"zh": "未连接", "en": "Offline"},  # LEGACY
-    "node.state_online": {"zh": "在线", "en": "Online"},  # LEGACY
     "component.host": {"zh": "主机", "en": "Host"},
     "component.pi": {"zh": "水下网关", "en": "UW Gateway"},
     "component.pico": {"zh": "控制器", "en": "Controller"},
@@ -58,10 +45,6 @@ _translations: dict[str, dict[str, str]] = {
     "component.connected": {"zh": "已连接", "en": "Connected"},
     "component.disconnected": {"zh": "未连接", "en": "Disconnected"},
 
-    "control.pan": {"zh": "水平", "en": "Pan"},  # LEGACY
-    "control.tilt": {"zh": "俯仰", "en": "Tilt"},  # LEGACY
-    "control.servo_manual": {"zh": "手动舵机控制", "en": "Manual Servo Control"},  # LEGACY
-    "control.winch": {"zh": "绞车控制", "en": "Winch Control"},  # LEGACY
     "gimbal.title": {"zh": "云台偏转", "en": "Gimbal Deflection"},
     "gimbal.pan": {"zh": "水平", "en": "Pan"},
     "gimbal.tilt": {"zh": "俯仰", "en": "Tilt"},
@@ -75,7 +58,11 @@ _translations: dict[str, dict[str, str]] = {
     "status.gimbal_mode": {"zh": "追踪模式", "en": "Tracking"},
     "status.mode_auto": {"zh": "自动", "en": "AUTO"},
     "status.mode_manual": {"zh": "手动", "en": "MANUAL"},
-    "control.e_stop": {"zh": "紧急停止", "en": "EMERGENCY STOP"},
+    "status.tracking_status": {"zh": "跟踪状态", "en": "Track Status"},
+    "status.track_tracking": {"zh": "追踪中", "en": "Tracking"},
+    "status.track_lost": {"zh": "目标丢失", "en": "Target Lost"},
+    "status.track_none": {"zh": "无目标", "en": "No Target"},
+    "control.e_stop": {"zh": "紧急制动", "en": "EMERGENCY STOP"},
     "control.winch_up": {"zh": "收缆 ↑", "en": "Reel ↑"},
     "control.winch_stop": {"zh": "停止", "en": "STOP"},
     "control.winch_down": {"zh": "放缆 ↓", "en": "Release ↓"},
@@ -91,13 +78,6 @@ _translations: dict[str, dict[str, str]] = {
     "tracking.pan_angle": {"zh": "水平角度", "en": "Pan Angle"},
     "tracking.tilt_angle": {"zh": "俯仰角度", "en": "Tilt Angle"},
 
-    "tracking.unavailable": {"zh": "追踪不可用 - 模型未加载", "en": "Tracking Unavailable - No Model"},
-    "tracking.target_lost": {"zh": "目标丢失", "en": "TARGET LOST"},
-    "tracking.no_tracking": {"zh": "追踪不可用", "en": "TRACKING UNAVAILABLE"},
-    "tracking.active": {"zh": "追踪已激活", "en": "Tracking Active"},
-    "tracking.reset_done": {"zh": "追踪器已重置", "en": "Tracker reset"},
-
-    "dashboard.imu": {"zh": "IMU", "en": "IMU"},  # LEGACY
     "dashboard.gyro": {"zh": "陀螺仪", "en": "Gyroscope"},
     "dashboard.depth": {"zh": "深度", "en": "Depth"},
     "dashboard.pressure": {"zh": "压力", "en": "Pressure"},

@@ -107,6 +107,21 @@ class MainWindow(QMainWindow):
 
         top.addSpacing(12)
 
+        self._tracking_status_header = QLabel(tr("status.tracking_status") + ":")
+        self._tracking_status_header.setStyleSheet("color: #8888cc; font-size: 11px;")
+        top.addWidget(self._tracking_status_header)
+
+        self._tracking_status_label = QLabel()
+        self._tracking_status_label.setStyleSheet(
+            "font-weight: bold; font-size: 11px; padding: 1px 6px; "
+            "border-radius: 3px;"
+        )
+        top.addWidget(self._tracking_status_label)
+        self._tracking_status = "none"
+        self._update_tracking_status_label()
+
+        top.addSpacing(12)
+
         self._lock_label = QLabel(tr("safety.locked"))
         self._lock_label.setObjectName("status_red")
         top.addWidget(self._lock_label)
@@ -146,7 +161,7 @@ class MainWindow(QMainWindow):
         right_top_layout.addWidget(self._motion_state)
 
         # Standalone E-Stop button
-        self._e_stop_btn = QPushButton(tr("safety.e_stop"))
+        self._e_stop_btn = QPushButton(tr("control.e_stop"))
         self._e_stop_btn.setStyleSheet(
             "QPushButton { background-color: #cc2222; color: white; font-weight: bold; "
             "font-size: 13px; border: 2px solid #ff4444; border-radius: 6px; "
@@ -386,7 +401,7 @@ class MainWindow(QMainWindow):
         self._mode_header_label.setText(tr("status.gimbal_mode") + ":")
         self._safety_label.setText(tr(f"safety.{self._current_safety}"))
         self._lock_label.setText(tr(f"safety.{'locked' if self._current_safety == 'locked' else 'unlocked'}"))
-        self._e_stop_btn.setText(tr("safety.e_stop"))
+        self._e_stop_btn.setText(tr("control.e_stop"))
         self._settings_menu.setTitle(tr("menu.settings"))
         self._album_menu.setTitle(tr("menu.album"))
         self._about_menu.setTitle(tr("menu.about"))
@@ -395,6 +410,8 @@ class MainWindow(QMainWindow):
         self._gopro_action.setText(tr("menu.gopro_control"))
         self._media_action.setText(tr("menu.album_media"))
         self._update_mode_label()
+        self._tracking_status_header.setText(tr("status.tracking_status") + ":")
+        self._update_tracking_status_label()
 
     def changeEvent(self, event):
         if event.type() == QEvent.WindowStateChange:
@@ -471,6 +488,35 @@ class MainWindow(QMainWindow):
                 "font-weight: bold; font-size: 11px; padding: 1px 8px; "
                 "border-radius: 3px; "
                 "background-color: #444422; color: #ccaa44;"
+            )
+
+    def set_tracking_status(self, status: str):
+        """status is 'tracking', 'lost', or 'none'."""
+        if status == self._tracking_status:
+            return
+        self._tracking_status = status
+        self._update_tracking_status_label()
+
+    def _update_tracking_status_label(self):
+        status_text = tr(f"status.track_{self._tracking_status}")
+        self._tracking_status_label.setText(status_text)
+        if self._tracking_status == "tracking":
+            self._tracking_status_label.setStyleSheet(
+                "font-weight: bold; font-size: 11px; padding: 1px 8px; "
+                "border-radius: 3px; "
+                "background-color: #224422; color: #44cc88;"
+            )
+        elif self._tracking_status == "lost":
+            self._tracking_status_label.setStyleSheet(
+                "font-weight: bold; font-size: 11px; padding: 1px 8px; "
+                "border-radius: 3px; "
+                "background-color: #443322; color: #cc8844;"
+            )
+        else:
+            self._tracking_status_label.setStyleSheet(
+                "font-weight: bold; font-size: 11px; padding: 1px 8px; "
+                "border-radius: 3px; "
+                "background-color: #333344; color: #8888aa;"
             )
 
     def set_safety_state(self, state: str, color: str):

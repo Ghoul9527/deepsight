@@ -36,6 +36,7 @@ from deepsight_host.ui.i18n import tr
 
 from enum import Enum
 
+from deepsight_shared.constants import SafetyState
 from deepsight_shared.protocol import (
     make_heartbeat, cmd_servo_set, cmd_winch_set, sys_safety, sys_ping,
     cmd_startup_check, Message,
@@ -166,7 +167,7 @@ class HostApp:
         self._servo_seq = 0              # sequence number for timecode tracing
 
         # Gimbal control state machine — per-axis manual flags
-        self._gimbal_mode = GimbalMode.AUTO
+        self._gimbal_mode = GimbalMode.MANUAL
         self._pan_manual = False    # True: gamepad yaw stick off-center
         self._tilt_manual = False   # True: gamepad pitch stick off-center
 
@@ -188,7 +189,7 @@ class HostApp:
         self._pi_stream_latency_ms: float = 0.0  # PCR-based GoPro→Pi latency
 
         # Gimbal mode label init
-        self._window.set_gimbal_mode("AUTO")
+        self._window.set_gimbal_mode("MANUAL")
 
         # Motion state → depth chart (mock V-profile)
         self._window.motion_state.state_changed.connect(self._on_motion_state_changed)
@@ -447,6 +448,25 @@ class HostApp:
         ) else None
         self._draw_overlay(frame, result, kalman_pos)
 
+        # Tracking status for top bar
+        #   MANUAL mode → no tracking (gamepad controls gimbal)
+        #   AUTO + visible → tracking active (YOLO)
+        #   AUTO + !visible + Kalman active → still tracking (Kalman接管预测)
+        #   AUTO + Kalman timed out (safety CAUTION) → no target, switch to MANUAL
+        if self._gimbal_mode == GimbalMode.MANUAL:
+            self._window.set_tracking_status("none")
+        elif result is not None and result.visible:
+            self._window.set_tracking_status("tracking")
+        elif self._framer.safety_state == SafetyState.CAUTION:
+            # Kalman timed out — fully lost
+            self._window.set_tracking_status("none")
+            self._gimbal_mode = GimbalMode.MANUAL
+            self._window.set_gimbal_mode("MANUAL")
+            logger.info("Kalman timeout — switching to MANUAL, no target")
+        else:
+            # Kalman is predicting (DEGRADED or NOMINAL with lost target)
+            self._window.set_tracking_status("tracking")
+
         # End-to-end latency estimate (ms)
         #   GoPro→Pi:    210ms FAQ baseline + PCR delta
         #   Pi→Host:     <1ms Ethernet
@@ -528,8 +548,14 @@ class HostApp:
             cv2.line(frame, (cx - 20, cy), (cx + 20, cy), (100, 100, 100), 1)
             cv2.line(frame, (cx, cy - 20), (cx, cy + 20), (100, 100, 100), 1)
 
+        # MANUAL mode — no tracking overlay
+        if self._gimbal_mode != GimbalMode.AUTO:
+            self._overlay_stats["none"] += 1
+            self._log_overlay_stats()
+            return
+
+        # AUTO + real YOLO detection — draw bounding box
         if result is not None and result.visible:
-            # Real detection — draw bounding box at detected position
             self._overlay_stats["visible"] += 1
             bx1 = int(result.bbox[0] * w)
             by1 = int(result.bbox[1] * h)
@@ -549,18 +575,15 @@ class HostApp:
             self._log_overlay_stats()
             return
 
-        # No detection — use Kalman prediction to maintain the box.
-        # The Kalman always provides a position: post-update (last known) or
-        # post-predict (extrapolated). Both are better than showing text.
-        if kalman_pos is not None:
+        # AUTO + no YOLO detection — Kalman prediction maintains the box
+        if kalman_pos is not None and self._framer.safety_state != SafetyState.CAUTION:
             self._overlay_stats["kalman"] += 1
             px, py = kalman_pos
-            # Use last known bbox size from tracker result or fallback
             if result is not None and result.bbox:
                 bw = (result.bbox[2] - result.bbox[0])
                 bh = (result.bbox[3] - result.bbox[1])
             else:
-                bw, bh = 0.08, 0.12  # fallback size
+                bw, bh = 0.08, 0.12
             bx1 = int((px - bw / 2) * w)
             by1 = int((py - bh / 2) * h)
             bx2 = int((px + bw / 2) * w)
@@ -576,15 +599,8 @@ class HostApp:
             self._log_overlay_stats()
             return
 
-        # Fallback: fully lost, no Kalman data yet
-        if result is not None and result.lost:
-            self._overlay_stats["lost"] += 1
-            _draw_text_cjk(frame, tr("tracking.target_lost"),
-                           (10, 60), (0, 0, 255), 30)
-        else:
-            self._overlay_stats["none"] += 1
-            _draw_text_cjk(frame, tr("tracking.no_tracking"),
-                           (10, 60), (100, 100, 100), 30)
+        # Kalman timed out — no box
+        self._overlay_stats["none"] += 1
         self._log_overlay_stats()
 
     def _log_overlay_stats(self):
