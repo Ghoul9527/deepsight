@@ -45,7 +45,7 @@ logging:
 
 controller:
   poll_hz: 50
-  dead_zone: 0.08
+  dead_zone: 0.0
   smoothing_alpha: 0.4
   max_winch_speed: 100
   max_servo_speed: 15

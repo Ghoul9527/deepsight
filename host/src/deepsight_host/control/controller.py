@@ -554,19 +554,40 @@ class GameController(QObject):
         self._smooth_plate += (raw_plate - self._smooth_plate) * self._smoothing_alpha
         self.plate_yaw_changed.emit(self._smooth_plate * self._plate_sign)
 
-        raw_gp = bridge_axis("gimbal_pitch", 3)
+        # ── Gimbal axes with radial deadzone (circular, not cross-shaped) ──
+        gp_cfg = _get_axis_cfg(m, "gimbal_pitch")
+        gy_cfg = _get_axis_cfg(m, "gimbal_yaw")
+        gp_idx = gp_cfg.get("axis", 3)
+        gy_idx = gy_cfg.get("axis", 2)
+
+        raw_gp = float(axes[gp_idx]) if 0 <= gp_idx < len(axes) else 0.0
+        raw_gy = float(axes[gy_idx]) if 0 <= gy_idx < len(axes) else 0.0
+
+        # Radial deadzone — evaluate the 2D vector, not per-axis
+        mag = (raw_gp * raw_gp + raw_gy * raw_gy) ** 0.5
+        if mag <= self._dead_zone or mag <= 0.0:
+            raw_gp = 0.0
+            raw_gy = 0.0
+        else:
+            scale = (mag - self._dead_zone) / ((1.0 - self._dead_zone) * mag)
+            raw_gp *= scale
+            raw_gy *= scale
+
+        # Per-axis inversion (applied after radial deadzone)
+        if gp_cfg.get("invert", False):
+            raw_gp = -raw_gp
+        if gy_cfg.get("invert", False):
+            raw_gy = -raw_gy
+
         if self._locked:
             raw_gp = 0.0
+            raw_gy = 0.0
         self._smooth_gimbal_pitch += (raw_gp - self._smooth_gimbal_pitch) * self._smoothing_alpha
-        # Snap to center when stick is released and EMA has nearly converged
         if raw_gp == 0.0 and abs(self._smooth_gimbal_pitch) < 0.02:
             self._smooth_gimbal_pitch = 0.0
         gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._gimbal_pitch_max
         self.gimbal_pitch_changed.emit(max(0.0, min(180.0, gimbal_pitch_angle)))
 
-        raw_gy = bridge_axis("gimbal_yaw", 2)
-        if self._locked:
-            raw_gy = 0.0
         self._smooth_gimbal_yaw += (raw_gy - self._smooth_gimbal_yaw) * self._smoothing_alpha
         if raw_gy == 0.0 and abs(self._smooth_gimbal_yaw) < 0.02:
             self._smooth_gimbal_yaw = 0.0
@@ -741,20 +762,48 @@ class GameController(QObject):
         plate_val = self._smooth_plate * self._plate_sign
         self.plate_yaw_changed.emit(plate_val)
 
-        # ── Gimbal pitch (right stick Y) ──
-        raw_gp = read_axis("gimbal_pitch", 3)
+        # ── Gimbal axes with radial deadzone (circular, not cross-shaped) ──
+        gp_cfg = _get_axis_cfg(m, "gimbal_pitch")
+        gy_cfg = _get_axis_cfg(m, "gimbal_yaw")
+        gp_idx = gp_cfg.get("axis", 3)
+        gy_idx = gy_cfg.get("axis", 2)
+
+        raw_gp = 0.0
+        raw_gy = 0.0
+        try:
+            if 0 <= gp_idx < num_axes:
+                raw_gp = self._joystick.get_axis(gp_idx)
+            if 0 <= gy_idx < num_axes:
+                raw_gy = self._joystick.get_axis(gy_idx)
+        except Exception:
+            raw_gp = 0.0
+            raw_gy = 0.0
+
+        # Radial deadzone — evaluate the 2D vector, not per-axis
+        mag = (raw_gp * raw_gp + raw_gy * raw_gy) ** 0.5
+        if mag <= self._dead_zone or mag <= 0.0:
+            raw_gp = 0.0
+            raw_gy = 0.0
+        else:
+            scale = (mag - self._dead_zone) / ((1.0 - self._dead_zone) * mag)
+            raw_gp *= scale
+            raw_gy *= scale
+
+        # Per-axis inversion (applied after radial deadzone)
+        if gp_cfg.get("invert", False):
+            raw_gp = -raw_gp
+        if gy_cfg.get("invert", False):
+            raw_gy = -raw_gy
+
         if self._locked:
             raw_gp = 0.0
+            raw_gy = 0.0
         self._smooth_gimbal_pitch += (raw_gp - self._smooth_gimbal_pitch) * self._smoothing_alpha
         if raw_gp == 0.0 and abs(self._smooth_gimbal_pitch) < 0.02:
             self._smooth_gimbal_pitch = 0.0
         gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._gimbal_pitch_max
         self.gimbal_pitch_changed.emit(max(0.0, min(180.0, gimbal_pitch_angle)))
 
-        # ── Gimbal yaw (right stick X) ──
-        raw_gy = read_axis("gimbal_yaw", 2)
-        if self._locked:
-            raw_gy = 0.0
         self._smooth_gimbal_yaw += (raw_gy - self._smooth_gimbal_yaw) * self._smoothing_alpha
         if raw_gy == 0.0 and abs(self._smooth_gimbal_yaw) < 0.02:
             self._smooth_gimbal_yaw = 0.0

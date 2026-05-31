@@ -787,7 +787,7 @@ class HostApp:
 
     def _on_gimbal_pitch(self, angle: float):
         """Gamepad right stick Y → gimbal pitch. Manual input overrides YOLO."""
-        if abs(angle - 90.0) > 1.0:
+        if abs(angle - 90.0) > 0.2:
             self._tilt_manual = True
             self._gimbal_mode = GimbalMode.MANUAL
             self._window.set_gimbal_mode("MANUAL")
@@ -798,7 +798,7 @@ class HostApp:
 
     def _on_gimbal_yaw(self, angle: float):
         """Gamepad right stick X → gimbal yaw. Manual input overrides YOLO."""
-        if abs(angle - 90.0) > 1.0:
+        if abs(angle - 90.0) > 0.2:
             self._pan_manual = True
             self._gimbal_mode = GimbalMode.MANUAL
             self._window.set_gimbal_mode("MANUAL")
