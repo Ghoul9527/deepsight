@@ -41,22 +41,22 @@ SERVO_PULSE_MAX_US = 2500
 
 # -- IMU (MPU6050, I2C) -----------------------------------
 IMU_I2C_ADDR = 0x68
-IMU_I2C_SCL_PIN = 5
-IMU_I2C_SDA_PIN = 4
+IMU_I2C_SCL_PIN = 1
+IMU_I2C_SDA_PIN = 0
 IMU_I2C_FREQ = 400000
 IMU_GYRO_SCALE = 250   # deg/s
 IMU_ACCEL_SCALE = 2    # g
 
 # -- Pressure / Depth (MS5837-30BA, I2C) ------------------
 PRESSURE_I2C_ADDR = 0x76
-PRESSURE_I2C_SCL_PIN = 5
-PRESSURE_I2C_SDA_PIN = 4
+PRESSURE_I2C_SCL_PIN = 1
+PRESSURE_I2C_SDA_PIN = 0
 PRESSURE_I2C_FREQ = 400000
 
 # -- Environment (BME280, I2C) ----------------------------
 BME280_I2C_ADDR = 0x77
-BME280_I2C_SCL_PIN = 5
-BME280_I2C_SDA_PIN = 4
+BME280_I2C_SCL_PIN = 1
+BME280_I2C_SDA_PIN = 0
 BME280_I2C_FREQ = 400000
 
 # -- Lighting (PWM) ---------------------------------------

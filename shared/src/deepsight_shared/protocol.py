@@ -279,12 +279,32 @@ def cmd_startup_check(node_id: str) -> Message:
     return new_message(node_id, "cmd.sys.startup_check", {})
 
 
+# ---- OTA (Over-The-Air firmware update) ----
+
+
+def ota_begin(node_id: str, files: list[dict]) -> Message:
+    """Start OTA session. files: [{"name": str, "size": int, "sha256": str}, ...]"""
+    return new_message(node_id, "ota.begin", {"files": files})
+
+
+def ota_chunk(node_id: str, file: str, seq: int, data: str, last: bool = False) -> Message:
+    """Send a file chunk. data is base64-encoded (512 bytes raw per chunk)."""
+    return new_message(node_id, "ota.chunk", {
+        "file": file, "seq": seq, "data": data, "last": last,
+    })
+
+
+def ota_commit(node_id: str) -> Message:
+    """Finalize OTA: verify SHA256, rename temp files, reset."""
+    return new_message(node_id, "ota.commit", {})
+
+
 # ---- Protocol validation ----
 
 
 KNOWN_TYPES = frozenset({
     "cmd.servo.set", "cmd.winch.set", "cmd.winch.stop",
-    "cmd.lighting.set", "cmd.gopro.record", "cmd.gopro.mode",
+    "cmd.light", "cmd.lighting.set", "cmd.gopro.record", "cmd.gopro.mode",
     "cmd.gopro.setting", "cmd.gopro.preset", "cmd.gopro.get_settings",
     "cmd.gopro.get_presets", "cmd.gopro.load_preset", "cmd.gopro.probe",
     "tel.imu", "tel.depth", "tel.pressure", "tel.env", "tel.leak",
@@ -294,6 +314,7 @@ KNOWN_TYPES = frozenset({
     "sys.heartbeat", "sys.ack", "sys.error", "sys.safety",
     "sys.startup", "sys.shutdown", "sys.ping", "sys.pong",
     "sys.startup_status", "cmd.sys.startup_check",
+    "ota.begin", "ota.chunk", "ota.commit", "ota.ack",
 })
 
 

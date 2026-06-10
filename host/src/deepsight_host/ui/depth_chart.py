@@ -41,6 +41,7 @@ class DepthChartWidget(QWidget):
         self._current_points: list[tuple[float, float]] = []
         self._session_start: float | None = None
         self._last_paint = 0.0
+        self._recording = False
         self._margin_left = 44
         self._margin_right = 16
         self._margin_top = 10
@@ -56,8 +57,17 @@ class DepthChartWidget(QWidget):
         self._last_paint = 0.0
         self.update()
 
+    def set_recording(self, active: bool):
+        if active:
+            self._recording = True
+            self.start_session()
+        else:
+            self._recording = False
+
     def record_depth(self, depth_m: float):
         """Push a depth sample during a dive."""
+        if not self._recording:
+            return
         if self._session_start is None:
             self.start_session()
         t = time.monotonic() - self._session_start

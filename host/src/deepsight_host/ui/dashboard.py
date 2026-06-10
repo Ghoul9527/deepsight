@@ -32,11 +32,9 @@ class DashboardWidget(QWidget):
         grid = QGridLayout()
         grid.setSpacing(2)
 
-        # Row 0: Gyro
+        # Row 0: IMU (roll only)
         self._add_cell(grid, 0, 0, "dashboard.gyro")
-        self._add_metric(grid, 0, 1, "yaw", "°")
-        self._add_metric(grid, 0, 2, "pitch", "°")
-        self._add_metric(grid, 0, 3, "roll", "°")
+        self._add_metric(grid, 0, 1, "roll", "°")
 
         # Row 1: Depth + Pressure + Temp
         self._add_cell(grid, 1, 0, "dashboard.depth")
@@ -127,8 +125,6 @@ class DashboardWidget(QWidget):
         self._labels[key].setText(text)
 
     def update_imu(self, yaw: float, pitch: float, roll: float):
-        self.update_value("yaw", yaw)
-        self.update_value("pitch", pitch)
         self.update_value("roll", roll)
 
     def update_depth(self, depth_m: float, pressure_mbar: float = 0.0,

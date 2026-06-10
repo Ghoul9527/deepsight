@@ -4,15 +4,14 @@ import gc
 import time
 
 import config
-from lib.servo import create_servo_driver
 from lib.imu import create_imu_driver
 from lib.pressure import create_pressure_driver
 from lib.bme280 import create_bme280_driver
 from lib.leak_sensor import create_leak_sensor
-from lib.lighting import create_lighting_driver
 from serial_link import SerialLink
 from command_parser import CommandParser
 from safety import SafetyMonitor
+from ota import OTAReceiver
 import telemetry
 
 
@@ -22,19 +21,15 @@ class ControlLoop:
         self._parser = CommandParser()
         self._safety = SafetyMonitor()
 
-        # Drivers
-        self.servo = create_servo_driver()
+        # Drivers (sensors only — servo/lighting now on Pi)
         self.imu = create_imu_driver()
         self.pressure = create_pressure_driver()
         self.bme280 = create_bme280_driver()
         self.leak = create_leak_sensor()
-        self.lighting = create_lighting_driver()
 
         # State
         self._running = False
         self._rx_line_count = 0
-        self._rx_servo_count = 0
-        self._last_servo_seq: dict[int, int] = {}  # servo_id -> last seq seen
         self._loop_count = 0
         self._last_loop_report = 0.0
         self._loop_hz = 0.0
@@ -53,25 +48,18 @@ class ControlLoop:
             "leak": [False, False, False, False],
         }
 
+        # OTA receiver
+        self._ota = OTAReceiver(self._serial.write)
+
         # Register command handlers
-        self._parser.register("cmd.servo.set", self._handle_servo)
-        self._parser.register("cmd.lighting.set", self._handle_lighting)
         self._parser.register("sys.heartbeat", self._handle_heartbeat)
         self._parser.register("tel.poll", self._handle_poll)
-
-    def _handle_servo(self, payload: dict):
-        servo_id = payload.get("servo_id", 0)
-        angle = payload.get("angle", 90.0)
-        self.servo.set_angle(servo_id, angle)
-        self._safety.command_received()
+        self._parser.register("ota.begin", self._ota.handle_begin)
+        self._parser.register("ota.chunk", self._ota.handle_chunk)
+        self._parser.register("ota.commit", self._ota.handle_commit)
 
     def _handle_heartbeat(self, _payload: dict):
         self._safety.command_received()
-
-    def _handle_lighting(self, payload: dict):
-        channel = payload.get("channel", 0)
-        brightness = payload.get("brightness", 0.0)
-        self.lighting.set_brightness(channel, brightness)
 
     def _handle_poll(self, _payload: dict):
         """Respond to Pi's telemetry poll with compact sensor snapshot."""
@@ -80,9 +68,6 @@ class ControlLoop:
             "st": self._step_ms,
             "hz": round(self._loop_hz, 1),
             "rx": self._rx_line_count,
-            "rs": self._rx_servo_count,
-            "s0": self._last_servo_seq.get(0, 0),
-            "s1": self._last_servo_seq.get(1, 0),
             "y": round(s["yaw"], 1),
             "p": round(s["pitch"], 1),
             "r": round(s["roll"], 1),
@@ -100,8 +85,6 @@ class ControlLoop:
         self._serial.write(msg)
 
     def init(self):
-        print("[PICO] init servo...")
-        self.servo.init()
         print("[PICO] init imu...")
         self.imu.init()
         print("[PICO] init pressure...")
@@ -110,8 +93,6 @@ class ControlLoop:
         self.bme280.init()
         print("[PICO] init leak...")
         self.leak.init()
-        print("[PICO] init lighting...")
-        self.lighting.init()
         print("[PICO] init serial...")
         self._serial.init()
         self._serial.flush_input()  # discard startup noise
@@ -158,12 +139,13 @@ class ControlLoop:
             gc.collect()
             self._gc_counter = 0
 
-        # Drain commands FIRST — always process gamepad input before anything
-        # that might block (telemetry write). Idempotent: only last of each
-        # command type is dispatched.
+        # Check OTA timeout
+        self._ota.check_timeout()
+
+        pending_ack = None
+
+        # Drain commands
         if config.ENABLE_UART_READ and startup_ticks >= 250:
-            last_servo = None
-            last_lighting = None
             last_heartbeat = False
             for _ in range(10):
                 try:
@@ -178,35 +160,22 @@ class ControlLoop:
                     parsed = self._parser.parse(line)
                     if parsed:
                         cmd_type, payload = parsed
-                        if cmd_type == "cmd.servo.set":
-                            self._rx_servo_count += 1
-                            sid = payload.get("servo_id", 0)
-                            self._last_servo_seq[sid] = payload.get("seq", 0)
-                            last_servo = payload
-                        elif cmd_type == "cmd.lighting.set":
-                            last_lighting = payload
-                        elif cmd_type == "sys.heartbeat":
+                        if cmd_type == "sys.heartbeat":
                             last_heartbeat = True
                         else:
-                            self._parser.dispatch(cmd_type, payload)
+                            result = self._parser.dispatch(cmd_type, payload)
+                            if result is not None:
+                                ack = telemetry.make_telemetry("ota.ack", result)
+                                self._serial.write(ack)
+                                if result.get("reset"):
+                                    pending_ack = result
                 except Exception as e:
                     print(f"[PICO] Parse error: {e}")
             if last_heartbeat:
                 self._safety.command_received()
-            if last_servo is not None:
-                self._safety.command_received()
-                self._parser.dispatch("cmd.servo.set", last_servo)
-            if last_lighting is not None:
-                self._parser.dispatch("cmd.lighting.set", last_lighting)
 
-        # Safety check
-        try:
-            if self._safety.check():
-                defaults = self._safety.get_default_angles()
-                for i, angle in enumerate(defaults):
-                    self.servo.set_angle(i, angle)
-        except Exception as e:
-            print(f"[PICO] safety error: {e}")
+        # Safety check (Pi heartbeat lost?)
+        self._safety.check()
 
         # Stagger sensor reads to avoid I2C blocking the control loop
         try:
@@ -215,6 +184,10 @@ class ControlLoop:
             print(f"[PICO] sensor error: {e}")
 
         self._step_ms = int((time.time() - t0) * 1000)
+
+        # Post-commit reset after ACK has been sent
+        if pending_ack is not None:
+            self._ota.post_commit_reset()
 
     def _read_sensors_staggered(self):
         """Read one sensor per tick in round-robin to keep loop fast."""

@@ -50,7 +50,7 @@ class MPU6050Driver(IMUDriver):
         self._yaw = 0.0
         self._pitch = 0.0
         self._roll = 0.0
-        self._last_time = time.time()
+        self._last_ticks = time.ticks_us()
 
     def init(self) -> bool:
         try:
@@ -81,7 +81,7 @@ class MPU6050Driver(IMUDriver):
         except Exception:
             return False
 
-        self._last_time = time.time()
+        self._last_ticks = time.ticks_us()
         super().init()
         return True
 
@@ -101,25 +101,27 @@ class MPU6050Driver(IMUDriver):
             return (self._yaw, self._pitch, self._roll, 0.0, 0.0, 9.81)
 
         ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps = raw
-        now = time.time()
-        dt = max(now - self._last_time, 0.001)
-        self._last_time = now
+        now = time.ticks_us()
+        dt = time.ticks_diff(now, self._last_ticks) / 1_000_000
+        dt = max(dt, 0.001)
+        self._last_ticks = now
 
-        # Complementary filter — 98% gyro integration, 2% accel correction
-        alpha = 0.98
+        # Vertical mount: X-axis down, chip faces away from lens
+        # Level: ax=-1g, ay=0 → roll=0
+        alpha = 0.5
 
-        # Accelerometer roll / pitch (gravity vector)
-        accel_roll = math.atan2(ay_g, az_g) * 180.0 / math.pi
-        accel_pitch = math.atan2(-ax_g, math.sqrt(ay_g * ay_g + az_g * az_g)) * 180.0 / math.pi
+        # Accel-derived roll
+        accel_roll = math.atan2(ay_g, -ax_g) * 180.0 / math.pi
 
-        # Gyro integration
-        self._roll += gx_dps * dt
-        self._pitch += gy_dps * dt
-        self._yaw += gz_dps * dt
+        # Gyro integration around forward axis
+        self._roll += gz_dps * dt
 
         # Fuse
         self._roll = alpha * self._roll + (1 - alpha) * accel_roll
-        self._pitch = alpha * self._pitch + (1 - alpha) * accel_pitch
+
+        # Pitch/yaw not useful in vertical mount, keep raw gyro for debug
+        self._pitch += gy_dps * dt
+        self._yaw += gx_dps * dt
 
         return (self._yaw, self._pitch, self._roll, ax_g, ay_g, az_g)
 

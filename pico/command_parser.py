@@ -19,9 +19,10 @@ class CommandParser:
         except (ValueError, KeyError, TypeError, MemoryError):
             return None
 
-    def dispatch(self, cmd_type: str, payload: dict):
+    def dispatch(self, cmd_type: str, payload: dict) -> dict | None:
         handler = self._handlers.get(cmd_type)
         if handler:
-            handler(payload)
+            return handler(payload)
         else:
             print(f"[CMD] Unknown: {cmd_type}")
+            return None

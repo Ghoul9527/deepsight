@@ -19,7 +19,9 @@ logger = logging.getLogger("pi.bridge.router")
 
 class MessageRouter:
     def __init__(self, host_link: HostLink, pico_link: PicoLink,
-                 stm32_link: Stm32Link):
+                 stm32_link: Stm32Link, servo_config: dict | None = None,
+                 stabilizer_config: dict | None = None,
+                 fin_config: dict | None = None):
         self._host = host_link
         self._pico = pico_link
         self._stm32 = stm32_link
@@ -28,6 +30,27 @@ class MessageRouter:
         self._servo_buf: dict[int, Message] = {}
         self._lighting_buf: Message | None = None
         self._send_interval = 0.02   # 50 Hz flush rate
+
+        # Local servo controller (Pi drives PCA9685 directly)
+        self._servo = None
+        if servo_config and servo_config.get("pca9685"):
+            from deepsight_pi.servo_controller import ServoController
+            self._servo = ServoController(servo_config)
+            logger.info("Servo controller: local PCA9685 mode")
+
+        # Roll stabilizer (IMU → roll servo auto-correction)
+        self._stabilizer = None
+        if stabilizer_config and stabilizer_config.get("roll", {}).get("enabled"):
+            from deepsight_pi.roll_stabilizer import RollStabilizer
+            self._stabilizer = RollStabilizer(self._servo, stabilizer_config["roll"])
+            logger.info("Roll stabilizer: enabled")
+
+        # Fin-yaw coupling (yaw + vertical speed → fin deflection)
+        self._fin = None
+        if fin_config and fin_config.get("enabled") and self._servo:
+            from deepsight_pi.fin_controller import FinController
+            self._fin = FinController(self._servo, fin_config)
+            logger.info("Fin coupling: enabled")
 
     async def start(self):
         self._running = True
@@ -50,14 +73,30 @@ class MessageRouter:
         """Send coalesced servo/lighting commands at fixed rate."""
         while self._running:
             await asyncio.sleep(self._send_interval)
+
+            if self._servo is not None:
+                self._servo.check_safety()
+
             count = 0
             sent_ids = []
             for sid, msg in list(self._servo_buf.items()):
+                # Skip roll servo when stabilizer is active
+                if sid == 2 and self._stabilizer is not None and self._stabilizer.is_active():
+                    sent_ids.append(sid)
+                    logger.debug("[PI tx] servo 2 skipped (stabilizer active)")
+                    continue
+                # Skip fin servos when coupling is active
+                if sid in (3, 4) and self._fin is not None and self._fin.is_active():
+                    sent_ids.append(sid)
+                    continue
                 p = msg.payload
+                angle = p.get("angle", 90.0)
+                if self._servo is not None:
+                    self._servo.set_angle(sid, angle)
+                else:
+                    await self._pico.send(msg)
                 logger.debug("[PI tx seq=%s] servo %s -> %.1f",
-                             p.get("seq", "?"), p.get("servo_id", "?"),
-                             p.get("angle", 0))
-                await self._pico.send(msg)
+                             p.get("seq", "?"), p.get("servo_id", "?"), angle)
                 sent_ids.append(sid)
                 count += 1
                 if count >= 4:
@@ -66,7 +105,12 @@ class MessageRouter:
                 self._servo_buf.pop(sid, None)
             # Flush lighting
             if self._lighting_buf is not None:
-                await self._pico.send(self._lighting_buf)
+                p = self._lighting_buf.payload
+                brightness = p.get("brightness", 0.0)
+                if self._servo is not None:
+                    self._servo.set_brightness(0, brightness)
+                else:
+                    await self._pico.send(self._lighting_buf)
                 self._lighting_buf = None
 
     async def _handle_message(self, msg: Message):
@@ -79,7 +123,26 @@ class MessageRouter:
             logger.debug("[PI rx seq=%s] servo %s -> %.1f  payload_keys=%s",
                          p.get("seq", "?"), sid, p.get("angle", 0), list(p.keys()))
             self._servo_buf[sid] = msg
-        elif msg.type.startswith("cmd.lighting"):
+            if sid == 2 and self._stabilizer is not None:
+                self._stabilizer.notify_manual()
+            if sid == 0 and self._fin is not None:
+                self._fin.update_yaw(p.get("angle", 90.0))
+                self._fin.step()
+            if sid in (3, 4) and self._fin is not None:
+                self._fin.notify_manual(p.get("angle", 90.0))
+        elif msg.type == "cmd.fin.auto":
+            if self._fin is not None:
+                self._fin.enable_auto()
+        elif msg.type == "cmd.fin.manual":
+            if self._fin is not None:
+                self._fin.disable_auto()
+        elif msg.type == "cmd.sim.depth":
+            if self._fin is not None:
+                p = msg.payload
+                self._fin.update_depth(p.get("depth_m", 0.0), sim=True,
+                                       speed_ms=p.get("speed_ms", 0.0))
+                self._fin.step()
+        elif msg.type.startswith("cmd.lighting") or msg.type == "cmd.light":
             self._lighting_buf = msg
         elif msg.type.startswith("cmd.winch"):
             await self._stm32.send(msg)
@@ -93,6 +156,8 @@ class MessageRouter:
         elif msg.type == "sys.safety":
             await self._pico.send(msg)
             await self._stm32.send(msg)
+        elif msg.type.startswith("ota."):
+            await self._pico.send(msg)
         else:
             logger.debug("Unrouted message: %s", msg.type)
 
@@ -100,7 +165,7 @@ class MessageRouter:
         """Forward real telemetry from Pico/STM32 and Pi system stats to Host."""
         prev_idle, prev_total = 0, 0
         while self._running:
-            await asyncio.sleep(0.2)  # 5 Hz
+            await asyncio.sleep(0.05)  # 20 Hz
 
             # ── Drain Pico recv queue ──
             pico_alive = False
@@ -146,7 +211,7 @@ class MessageRouter:
             await self._host.send(msg)
 
     async def _poll_pico(self):
-        """Poll Pico for telemetry at 1 Hz. Pico responds immediately,
+        """Poll Pico for telemetry at 20 Hz. Pico responds immediately,
         avoiding the 1s blocking write that occurs with periodic output."""
         await asyncio.sleep(2.0)  # wait for Pico boot
         while self._running:
@@ -155,31 +220,38 @@ class MessageRouter:
                 await self._pico.send(msg)
             except Exception as e:
                 logger.debug("Poll Pico error: %s", e)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.05)
 
     async def _translate_compact(self, msg: Message):
         """Split compact type 't' into individual tel.imu/depth/env/leak."""
         p = msg.payload
         node = msg.node_id
-        logger.debug("[PI poll_resp] s0=%s s1=%s rs=%s hz=%s st=%s",
-                     p.get("s0", "?"), p.get("s1", "?"),
-                     p.get("rs", "?"), p.get("hz", "?"), p.get("st", "?"))
+        logger.debug("[PI poll_resp] hz=%s st=%s",
+                     p.get("hz", "?"), p.get("st", "?"))
 
+        roll = float(p.get("r", 0))
         await self._host.send(tel_imu(
             node,
             yaw=float(p.get("y", 0)),
             pitch=float(p.get("p", 0)),
-            roll=float(p.get("r", 0)),
+            roll=roll,
             ax=float(p.get("ax", 0)),
             ay=float(p.get("ay", 0)),
             az=float(p.get("az", 0)),
         ))
+        if self._stabilizer is not None:
+            self._stabilizer.update_imu(roll)
+            self._stabilizer.step()
+        depth_m = float(p.get("d", 0))
         await self._host.send(tel_depth(
             node,
-            depth_m=float(p.get("d", 0)),
+            depth_m=depth_m,
             pressure_mbar=float(p.get("pr", 0)),
             temperature_c=float(p.get("wt", 0)),
         ))
+        if self._fin is not None:
+            self._fin.update_depth(depth_m)
+            self._fin.step()
         await self._host.send(tel_env(
             node,
             temp_c=float(p.get("et", 0)),

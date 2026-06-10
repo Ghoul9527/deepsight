@@ -17,6 +17,47 @@ serial:
   pico_baud: 115200
   stm32_baud: 115200
 
+hardware:
+  pca9685:
+    i2c_bus: 1
+    i2c_address: 0x40
+    pwm_freq: 50
+    pulse_min_us: 500
+    pulse_max_us: 2500
+    angle_min: 0.0
+    angle_max: 180.0
+    default_angle: 90.0
+    safety_timeout_s: 3.0
+  servos:
+    - {id: 0, channel: 0, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
+    - {id: 1, channel: 1, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
+    - {id: 2, channel: 2, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
+    - {id: 3, channel: 3, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
+    - {id: 4, channel: 4, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
+  lights:
+    - {id: 0, channel: 5}
+
+stabilizer:
+  roll:
+    enabled: true
+    kp: 3.0
+    max_correction: 45.0
+    manual_timeout_s: 2.0
+    deadband_deg: 1.5
+    ema_alpha: 0.12
+    deadband_deg: 1.5
+    ema_alpha: 0.12
+
+fin_coupling:
+  enabled: true
+  yaw_max_deg: 15.0
+  speed_min: 0.1
+  speed_max: 2.0
+  deflection_at_slow: 45.0
+  deflection_at_fast: 15.0
+  speed_deadband: 0.05
+  ema_alpha: 0.12
+
 watchdog:
   heartbeat_interval_s: 0.5
   reconnect_delay_s: 2.0

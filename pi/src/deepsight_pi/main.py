@@ -26,7 +26,10 @@ class PiNode:
         self.host_link = HostLink(self.config)
         self.pico_link = PicoLink(self.config)
         self.stm32_link = Stm32Link(self.config)
-        self.router = MessageRouter(self.host_link, self.pico_link, self.stm32_link)
+        self.router = MessageRouter(self.host_link, self.pico_link, self.stm32_link,
+                                     servo_config=self.config.hardware,
+                                     stabilizer_config=self.config.stabilizer,
+                                     fin_config=self.config.fin_coupling)
 
         # API
         self.api = PiApi(self.config)

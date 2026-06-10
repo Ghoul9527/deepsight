@@ -32,6 +32,10 @@ class PiConfig:
         self.heartbeat_interval_s: float = w.get("heartbeat_interval_s", 0.5)
         self.reconnect_delay_s: float = w.get("reconnect_delay_s", 2.0)
 
+        self.hardware: dict = data.get("hardware", {})
+        self.stabilizer: dict = data.get("stabilizer", {})
+        self.fin_coupling: dict = data.get("fin_coupling", {})
+
         lg = data.get("logging", {})
         self.log_level: str = lg.get("level", "DEBUG")
         self.log_dir: str = lg.get("dir", "logs/pi/")

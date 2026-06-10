@@ -588,9 +588,7 @@ class GameController(QObject):
         gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._gimbal_pitch_max
         self.gimbal_pitch_changed.emit(max(0.0, min(180.0, gimbal_pitch_angle)))
 
-        self._smooth_gimbal_yaw += (raw_gy - self._smooth_gimbal_yaw) * self._smoothing_alpha
-        if raw_gy == 0.0 and abs(self._smooth_gimbal_yaw) < 0.02:
-            self._smooth_gimbal_yaw = 0.0
+        self._smooth_gimbal_yaw = raw_gy
         gimbal_yaw_angle = 90.0 + self._smooth_gimbal_yaw * self._gimbal_yaw_max
         self.gimbal_yaw_changed.emit(max(0.0, min(180.0, gimbal_yaw_angle)))
 
@@ -759,8 +757,7 @@ class GameController(QObject):
         if self._locked:
             raw_plate = 0.0
         self._smooth_plate += (raw_plate - self._smooth_plate) * self._smoothing_alpha
-        plate_val = self._smooth_plate * self._plate_sign
-        self.plate_yaw_changed.emit(plate_val)
+        self.plate_yaw_changed.emit(self._smooth_plate * self._plate_sign)
 
         # ── Gimbal axes with radial deadzone (circular, not cross-shaped) ──
         gp_cfg = _get_axis_cfg(m, "gimbal_pitch")
@@ -804,9 +801,7 @@ class GameController(QObject):
         gimbal_pitch_angle = 90.0 + self._smooth_gimbal_pitch * self._gimbal_pitch_max
         self.gimbal_pitch_changed.emit(max(0.0, min(180.0, gimbal_pitch_angle)))
 
-        self._smooth_gimbal_yaw += (raw_gy - self._smooth_gimbal_yaw) * self._smoothing_alpha
-        if raw_gy == 0.0 and abs(self._smooth_gimbal_yaw) < 0.02:
-            self._smooth_gimbal_yaw = 0.0
+        self._smooth_gimbal_yaw = raw_gy
         gimbal_yaw_angle = 90.0 + self._smooth_gimbal_yaw * self._gimbal_yaw_max
         self.gimbal_yaw_changed.emit(max(0.0, min(180.0, gimbal_yaw_angle)))
 

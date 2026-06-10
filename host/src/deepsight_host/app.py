@@ -181,6 +181,7 @@ class HostApp:
 
         # Motion state tracking for depth chart lifecycle
         self._prev_motion_state: str = "descending"
+        self._current_sim_speed: float = 0.0
 
         # Performance tracking
         self._frame_count = 0
@@ -193,8 +194,11 @@ class HostApp:
 
         # Motion state → depth chart (mock V-profile)
         self._window.motion_state.state_changed.connect(self._on_motion_state_changed)
-        self._window.motion_state.depth_changed.connect(
-            self._window.depth_chart.record_depth)
+        from deepsight_host.ui.mock_control import MockControlPanel
+        self._mock_window = MockControlPanel()
+        self._mock_window.setWindowTitle("Mock Motion Control")
+        self._mock_window.state_changed.connect(self._on_mock_state)
+
 
         # Timers
         self._frame_timer = QTimer()
@@ -288,13 +292,13 @@ class HostApp:
 
         self._window.show()
         self._controller.start()
-        self._window.motion_state.start_mock()
+        self._mock_window.show()
+        self._mock_window.start()
         self._window.set_lock_state(True)  # initial lock overlay
         self._recorder.start()
         self._update_tracking_status()
 
-        # Delay fullscreen to let window fully settle
-        QTimer.singleShot(500, self._window.showFullScreen)
+        self._window.resize(1280, 800)
 
         # Start startup self-check (delayed, let network settle)
         QTimer.singleShot(1000, self._startup_check.start)
@@ -715,11 +719,24 @@ class HostApp:
         self._prev_motion_state = state
 
         if state == "descending":
-            # New cycle begins — clear previous V-profile
             self._window.depth_chart.start_session()
         elif state == "hovering" and prev == "ascending":
-            # Cycle complete (top hover after ascending) — archive the V
             self._window.depth_chart.end_dive(130.0)
+
+    def _on_mock_state(self, state: str, speed_ms: float, depth_m: float):
+        """Mock control panel tick → update motion state display + depth chart + Pi."""
+        self._current_sim_speed = speed_ms
+        self._window.motion_state.set_real_data(state, speed_ms, depth_m)
+        self._window.depth_chart.record_depth(depth_m)
+        if speed_ms > 0:
+            self._controller.set_plate_sign(-1.0)
+        elif speed_ms < 0:
+            self._controller.set_plate_sign(1.0)
+        from deepsight_shared.protocol import new_message
+        msg = new_message("host", "cmd.sim.depth", {
+            "depth_m": depth_m, "speed_ms": speed_ms,
+        })
+        self._schedule_async(self._udp.send(msg))
 
     def _on_winch_speed(self, speed: float):
         """Winch speed from left stick Y. Positive = reel in (ascend)."""
@@ -734,18 +751,19 @@ class HostApp:
         self._last_winch_direction = direction
         self._schedule_async(self._udp.send(
             cmd_winch_set("host", abs_speed, direction)))
-        direction_sign = self._controller.winch_direction
-        self._controller.set_plate_sign(direction_sign)
 
     def _on_fin_steer(self, value: float):
-        """Fin steering from left stick X. Differential mixing for left/right fins.
-        value = -1..1 (left..right). Center = 90 deg.
-        """
-        max_deflection = self.config.plate_max_angle
-        left_angle = 90.0 - value * max_deflection   # stick right → left fin forward (>90)
-        right_angle = 90.0 + value * max_deflection  # stick right → right fin back (<90)
-        self._send_servo(3, float(left_angle))
-        self._send_servo(4, float(right_angle))
+        """Fin steering from left stick X. Max deflection scales with speed."""
+        speed = abs(self._current_sim_speed)
+        if speed <= 0.1:
+            max_deflection = 45.0
+        elif speed >= 2.0:
+            max_deflection = 15.0
+        else:
+            max_deflection = 45.0 + (speed - 0.1) * (15.0 - 45.0) / (2.0 - 0.1)
+        angle = 90.0 + value * max_deflection
+        self._send_servo(3, float(angle))
+        self._send_servo(4, float(angle))
 
     def _on_roll_trim(self, angle: float):
         """Roll gimbal trim from D-pad L/R. angle = 0..180 deg."""
@@ -816,18 +834,23 @@ class HostApp:
 
     def _on_tracking_toggle(self):
         """RB: toggle AUTO ↔ MANUAL gimbal control mode."""
+        from deepsight_shared.protocol import new_message
         if self._gimbal_mode == GimbalMode.AUTO:
             self._gimbal_mode = GimbalMode.MANUAL
             self._pan_manual = False
             self._tilt_manual = False
             self._window.set_gimbal_mode("MANUAL")
             logger.info("Gimbal mode: MANUAL (gamepad)")
+            self._schedule_async(self._udp.send(
+                new_message("host", "cmd.fin.manual")))
         else:
             self._gimbal_mode = GimbalMode.AUTO
             self._pan_manual = False
             self._tilt_manual = False
             self._window.set_gimbal_mode("AUTO")
             logger.info("Gimbal mode: AUTO (YOLO)")
+            self._schedule_async(self._udp.send(
+                new_message("host", "cmd.fin.auto")))
 
     def _on_record_toggle(self):
         """B: toggle recording on/off."""
@@ -839,14 +862,15 @@ class HostApp:
             if status.recording:
                 ok = await self._gopro.stop_recording()
                 logger.info("Recording stop: %s", "OK" if ok else "FAIL")
-                # HERO13 may stop the preview stream during recording;
-                # restart it after stopping.
+                self._window.depth_chart.set_recording(False)
                 await asyncio.sleep(1.0)
                 await self._gopro.start_viewfinder(port=8554)
             else:
                 await self._gopro.enable_wired_usb(True)
                 ok = await self._gopro.start_recording()
                 logger.info("Recording start: %s", "OK" if ok else "FAIL")
+                if ok:
+                    self._window.depth_chart.set_recording(True)
         except Exception as e:
             logger.warning("Record toggle failed: %s", e)
 
