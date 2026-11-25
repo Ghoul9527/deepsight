@@ -41,3 +41,17 @@ details are in [docs/gopro_mission1_pro.md](docs/gopro_mission1_pro.md).
 ## License
 
 Proprietary — all rights reserved.
+## Windows HUD export
+
+Install Pillow in the Host Python environment and make FFmpeg available on
+`PATH` or pass its executable with `--ffmpeg`. The input MP4 and depth JSONL
+are read without changes. The exporter looks for a same-name JSONL unless
+`--data` is specified.
+
+```powershell
+.\scripts\Burn-HUD.cmd "D:\Media\GX010011.MP4" --lang zh --name "陈林" --discipline FIM --target-depth 45
+```
+
+Use `--lang en` for English. `--offset 1.25` puts JSONL time zero at video
+time 1.25 seconds. The default output is `GX010011_HUD_zh.mp4` for Chinese
+and `GX010011_HUD_en.mp4` for English.

@@ -9,6 +9,8 @@ network:
   host_address: "192.168.3.158"
   host_udp_port: 5005
   host_ws_port: 5001
+  gopro_address: "172.22.121.51"
+  gopro_udp_port: 8554
 
 serial:
   pico_port: "/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_e6611032e3697231-if00"     # Pico USB CDC (runtime data: cmd + telemetry)

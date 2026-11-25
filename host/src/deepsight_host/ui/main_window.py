@@ -51,6 +51,8 @@ class MainWindow(QMainWindow):
     gopro_probe_result = Signal(str, str, object, bool)  # setting, current, available, changed
     gopro_status_updated = Signal(dict)  # raw camera state for component_status
     gopro_preset_switched = Signal(int, object)  # preset_id, aspect_ratio (w,h) or None
+    depth_recording_changed = Signal(bool)
+    depth_recording_notice = Signal(str)
 
     # Standalone E-Stop signal
     e_stop = Signal()

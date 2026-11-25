@@ -5,18 +5,25 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import time
+
+from deepsight_shared.host_registration import LEASE_SECONDS
+from deepsight_shared.protocol import Message
 
 from deepsight_pi.config import PiConfig
-from deepsight_shared.protocol import Message
 
 logger = logging.getLogger("pi.bridge.host")
 
 
 class HostLink:
-    def __init__(self, config: PiConfig):
+    def __init__(self, config: PiConfig, *, dynamic: bool = False):
         self._local_port = config.udp_port
         self._host_addr = config.host_address
         self._host_port = config.host_udp_port
+        self._dynamic = dynamic
+        self._owner: object | None = None
+        self._registered_address: str | None = None
+        self._expires_at = 0.0
         self._sock: socket.socket | None = None
         self._running = False
         self._recv_queue: asyncio.Queue[Message] = asyncio.Queue()
@@ -29,6 +36,30 @@ class HostLink:
     def running(self) -> bool:
         return self._running
 
+    @property
+    def return_address(self) -> str | None:
+        if not self._dynamic:
+            return self._host_addr
+        if time.monotonic() < self._expires_at:
+            return self._registered_address
+        return None
+
+    def register(self, owner: object, address: str) -> bool:
+        if self.return_address is not None and self._owner is not owner:
+            return False
+        if self._owner is not owner:
+            logger.info("Registered Host return address: %s", address)
+        self._owner = owner
+        self._registered_address = address
+        self._expires_at = time.monotonic() + LEASE_SECONDS
+        return True
+
+    def release(self, owner: object):
+        if self._owner is owner:
+            self._owner = None
+            self._expires_at = 0.0
+            self._registered_address = None
+
     async def start(self):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setblocking(False)
@@ -36,8 +67,12 @@ class HostLink:
         self._sock.bind(("0.0.0.0", self._local_port))
         self._running = True
         asyncio.create_task(self._recv_loop())
-        logger.info("HostLink started on :%d → %s:%d",
-                     self._local_port, self._host_addr, self._host_port)
+        if self._dynamic:
+            logger.info("HostLink started on :%d, waiting for Host registration",
+                        self._local_port)
+        else:
+            logger.info("HostLink started on :%d → %s:%d",
+                        self._local_port, self._host_addr, self._host_port)
 
     async def _recv_loop(self):
         loop = asyncio.get_event_loop()
@@ -54,11 +89,12 @@ class HostLink:
                 await asyncio.sleep(0.01)
 
     async def send(self, msg: Message):
-        if not self._sock or not self._running:
+        address = self.return_address
+        if not self._sock or not self._running or address is None:
             return
         loop = asyncio.get_event_loop()
         data = msg.to_bytes()
-        await loop.sock_sendto(self._sock, data, (self._host_addr, self._host_port))
+        await loop.sock_sendto(self._sock, data, (address, self._host_port))
 
     async def stop(self):
         self._running = False

@@ -11,11 +11,13 @@ import sys
 from deepsight_pi.config import PiConfig
 from deepsight_pi.api import PiApi
 from deepsight_pi.bridge.host_link import HostLink
+from deepsight_pi.bridge.video_relay import VideoRelay
 from deepsight_pi.bridge.pico_link import PicoLink
 from deepsight_pi.bridge.stm32_link import Stm32Link
 from deepsight_pi.bridge.message_router import MessageRouter
 from deepsight_pi.watchdog import Watchdog
 from deepsight_pi.hardware.leak_sensor import PiLeakMonitor
+from deepsight_shared.host_registration import pairing_key
 
 logger = logging.getLogger("pi")
 
@@ -26,7 +28,12 @@ class PiNode:
         self._setup_logging()
 
         # Communication links
-        self.host_link = HostLink(self.config)
+        host_key = pairing_key()
+        self.host_link = HostLink(self.config, dynamic=host_key is not None)
+        self.video_relay = (
+            VideoRelay(self.host_link, self.config.gopro_address, self.config.gopro_udp_port)
+            if host_key is not None else None
+        )
         self.pico_link = PicoLink(self.config)
         self.stm32_link = Stm32Link(self.config)
         self.router = MessageRouter(self.host_link, self.pico_link, self.stm32_link,
@@ -38,7 +45,7 @@ class PiNode:
             self.host_link, self.config.leak_sensor, self.config.pi_id)
 
         # API
-        self.api = PiApi(self.config)
+        self.api = PiApi(self.config, self.host_link, host_key)
 
         # Watchdog
         self.watchdog = Watchdog(self.config, self.host_link)
@@ -61,6 +68,8 @@ class PiNode:
     async def run(self):
         logger.info("Starting DeepSight Pi gateway...")
 
+        if self.video_relay is not None:
+            await self.video_relay.start()
         await self.host_link.start()
         if self.config.pico_port != "mock":
             await self.pico_link.start()
@@ -83,6 +92,8 @@ class PiNode:
         await self.watchdog.stop()
         await self.router.stop()
         await self.host_link.stop()
+        if self.video_relay is not None:
+            self.video_relay.stop()
         await self.api.stop()
 
 

@@ -46,8 +46,8 @@ class LockState(Enum):
     UNLOCKED = "unlocked"
 
 
-# ── Fallback mapping (DirectInput / F310 layout, SDL2 button order) ──
-# Button indices match SDL2 / pygame convention:
+# ── Generic mapping (matches the native bridge button order) ──
+# Button indices:
 #   0=A, 1=B, 2=X, 3=Y, 4=LB, 5=RB, 6=Back, 7=Start, 8=L3, 9=R3, 10=Home,
 #   11=LT (digital), 12=RT (digital)
 _FALLBACK_MAPPING: dict[str, Any] = {
@@ -71,6 +71,14 @@ _FALLBACK_MAPPING: dict[str, Any] = {
     },
 }
 
+# SDL identifies the F310 in DirectInput mode as Logitech Dual Action on Windows.
+_F310_DIRECTINPUT_BUTTONS = {
+    "preset": 1, "record": 2, "hud": 0, "roll_recenter": 3,
+    "drop_to_3m": 4, "tracking": 5, "light_down": 6, "light_up": 7,
+    "e_stop": 8, "lock": 9, "body_recenter": 10, "gimbal_recenter": 11,
+    "all_recenter": None,
+}
+
 
 def _match_mapping(name: str, mappings: dict) -> dict[str, Any]:
     """Return the mapping whose name_patterns matches the controller name, or generic/fallback."""
@@ -81,9 +89,13 @@ def _match_mapping(name: str, mappings: dict) -> dict[str, Any]:
             if pat.lower() in name_lower:
                 logger.info("Controller mapping: %s (matched '%s')", key, pat)
                 return m
-    if "generic" in mappings:
-        return mappings["generic"]
-    return _FALLBACK_MAPPING
+    generic = mappings.get("generic", _FALLBACK_MAPPING)
+    if sys.platform == "win32" and name_lower in (
+        "logitech dual action", "logitech f310 gamepad (dinput)",
+    ):
+        logger.info("Controller mapping: Logitech F310 DirectInput (Start=9, Back=8)")
+        return {**generic, "buttons": _F310_DIRECTINPUT_BUTTONS}
+    return generic
 
 
 def _get_axis_cfg(mapping: dict, name: str) -> dict:
@@ -98,7 +110,7 @@ class GameController(QObject):
     """Reads a USB gamepad and emits typed control signals.
 
     Mapping is selected automatically from the controller name via config patterns.
-    Falls back to DirectInput/F310 layout when no pattern matches.
+    Uses the generic layout when no device-specific mapping matches.
 
     Lock / safety:
       - System starts LOCKED; all stick inputs are ignored until Start is pressed.
@@ -363,6 +375,12 @@ class GameController(QObject):
 
                 name = self._joystick.get_name()
                 self._mapping = _match_mapping(name, self._mappings)
+                start_index = _get_button_idx(self._mapping, "lock")
+                self._btn_prev["lock"] = (
+                    start_index is not None
+                    and 0 <= start_index < self._joystick.get_numbuttons()
+                    and bool(self._joystick.get_button(start_index))
+                )
 
                 self._connected = True
                 self._locked = True

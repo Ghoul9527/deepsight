@@ -29,6 +29,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+deepsight-host-pairing.key
 
 # Training artifacts
 runs/

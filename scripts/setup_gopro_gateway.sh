@@ -3,7 +3,7 @@
 # Runs on Pi (or NanoPi/OpenWrt). Enables Host ↔ GoPro routing.
 #
 # Usage: sudo ./setup_gopro_gateway.sh [host_ip] [gopro_ip] [udp_port]
-#   host_ip  - Host computer IP (default: 192.168.3.158)
+#   host_ip  - Host computer IP, or "dynamic" when PiNode owns the UDP relay
 #   gopro_ip - GoPro USB Ethernet IP (default: auto-detect)
 #   udp_port - UDP stream port (default: 8554)
 #
@@ -153,14 +153,18 @@ echo "  → TCP relay started: :${TCP_PORT} → ${GOPRO_IP}:${TCP_PORT} (PID $!)
 # socat listens on the Pi and forwards to Host.
 # GoPro sends UDP to the Pi's USB IP (because of SNAT on HTTP requests).
 
-SOCAT_PID=$(pgrep -f "socat.*UDP4.*:${UDP_PORT}" || true)
-if [ -n "${SOCAT_PID:-}" ]; then
-    kill "$SOCAT_PID" 2>/dev/null || true
+mapfile -t UDP_RELAY_PIDS < <(pgrep -f "^socat UDP4-LISTEN:${UDP_PORT}," || true)
+if (( ${#UDP_RELAY_PIDS[@]} )); then
+    kill "${UDP_RELAY_PIDS[@]}" 2>/dev/null || true
     sleep 0.5
 fi
 
-nohup socat "UDP4-LISTEN:${UDP_PORT},fork,reuseaddr" "UDP4:${HOST_IP}:${UDP_PORT}" >/dev/null 2>&1 &
-echo "  → UDP relay started: :${UDP_PORT} → ${HOST_IP}:${UDP_PORT} (PID $!)"
+if [ "$HOST_IP" = dynamic ]; then
+    echo "  → UDP relay managed by DeepSight Pi"
+else
+    nohup socat "UDP4-LISTEN:${UDP_PORT},fork,reuseaddr" "UDP4:${HOST_IP}:${UDP_PORT}" >/dev/null 2>&1 &
+    echo "  → UDP relay started: :${UDP_PORT} → ${HOST_IP}:${UDP_PORT} (PID $!)"
+fi
 
 echo ""
 echo "Gateway setup complete."

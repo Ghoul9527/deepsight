@@ -20,6 +20,8 @@ class PiConfig:
         self.host_address: str = n.get("host_address", "127.0.0.1")
         self.host_udp_port: int = n.get("host_udp_port", 5000)
         self.host_ws_port: int = n.get("host_ws_port", 5001)
+        self.gopro_address: str = n.get("gopro_address", "172.22.121.51")
+        self.gopro_udp_port: int = n.get("gopro_udp_port", 8554)
 
         s = data.get("serial", {})
         self.pico_port: str = s.get("pico_port", "mock")

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QWidget,
     QFormLayout,
+    QFileDialog,
     QLineEdit,
     QSpinBox,
     QDoubleSpinBox,
@@ -28,9 +29,6 @@ from deepsight_host.config import HostConfig
 from deepsight_host.ui.i18n import I18n, tr
 
 logger = logging.getLogger("host.ui.settings")
-
-CONFIG_PATH = Path("configs/host_config.yaml")
-
 
 class SettingsDialog(QDialog):
     """Multi-tab settings dialog for host configuration."""
@@ -222,6 +220,14 @@ class SettingsDialog(QDialog):
         self._telemetry_record = QComboBox()
         self._telemetry_record.addItems([tr("settings.off"), tr("settings.on")])
         log_layout.addRow(tr("settings.telemetry_record"), self._telemetry_record)
+        self._depth_dir = QLineEdit()
+        self._depth_dir_label = QLabel(tr("settings.depth_dir"))
+        self._depth_dir_button = QPushButton(tr("settings.choose_depth_dir"))
+        self._depth_dir_button.clicked.connect(self._choose_depth_dir)
+        depth_row = QHBoxLayout()
+        depth_row.addWidget(self._depth_dir)
+        depth_row.addWidget(self._depth_dir_button)
+        log_layout.addRow(self._depth_dir_label, depth_row)
 
         self._tabs.addTab(self._logging_tab, tr("settings.tab_logging"))
 
@@ -282,6 +288,13 @@ class SettingsDialog(QDialog):
 
         self._log_level.setCurrentText(c.log_level)
         self._telemetry_record.setCurrentIndex(1 if c.telemetry_record else 0)
+        self._depth_dir.setText(str(c.depth_recording_dir))
+
+    def _choose_depth_dir(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, tr("settings.choose_depth_dir"), self._depth_dir.text())
+        if folder:
+            self._depth_dir.setText(folder)
 
     def _save_and_accept(self):
         """Write values back to config file and update runtime config."""
@@ -325,6 +338,8 @@ class SettingsDialog(QDialog):
         # Logging
         c.log_level = self._log_level.currentText()
         c.telemetry_record = self._telemetry_record.currentIndex() == 1
+        if folder := self._depth_dir.text().strip():
+            c.depth_recording_dir = Path(folder).expanduser().resolve()
 
         self._write_config_file()
 
@@ -396,10 +411,11 @@ class SettingsDialog(QDialog):
                 "dir": c.log_dir,
                 "telemetry_record": c.telemetry_record,
             },
+            "download": {"depth_dir": str(c.depth_recording_dir)},
         }
         # Preserve sections not edited by this dialog (including lighting).
-        if CONFIG_PATH.exists():
-            with open(CONFIG_PATH) as f:
+        if c.config_path.exists():
+            with c.config_path.open(encoding="utf-8") as f:
                 existing = yaml.safe_load(f) or {}
             for key, values in data.items():
                 if isinstance(values, dict) and isinstance(existing.get(key), dict):
@@ -407,9 +423,9 @@ class SettingsDialog(QDialog):
                 else:
                     existing[key] = values
             data = existing
-        with open(CONFIG_PATH, "w") as f:
+        with c.config_path.open("w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-        logger.info("Settings saved to %s", CONFIG_PATH)
+        logger.info("Settings saved to %s", c.config_path)
 
     def _reset_defaults(self):
         """Reset all fields to default values."""
@@ -445,6 +461,8 @@ class SettingsDialog(QDialog):
         self._tabs.setTabText(4, tr("settings.tab_plate"))
         self._tabs.setTabText(5, tr("settings.tab_safety"))
         self._tabs.setTabText(6, tr("settings.tab_logging"))
+        self._depth_dir_label.setText(tr("settings.depth_dir"))
+        self._depth_dir_button.setText(tr("settings.choose_depth_dir"))
         self._btn_box.button(QDialogButtonBox.Ok).setText(tr("settings.ok"))
         self._btn_box.button(QDialogButtonBox.Cancel).setText(tr("settings.cancel"))
         self._reset_btn.setText(tr("settings.reset_defaults"))

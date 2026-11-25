@@ -25,8 +25,10 @@ class NoVideoSource:
         self.width = width
         self.height = height
         self.fps = fps
+        self._placeholder: np.ndarray | None = None
+        self._placeholder_text = ""
 
-    def _build_frame(self) -> np.ndarray:
+    def _build_frame(self, text: str) -> np.ndarray:
         h, w = self.height, self.width
         frame = np.zeros((h, w, 3), dtype=np.uint8)
 
@@ -36,7 +38,6 @@ class NoVideoSource:
             for i in range(0, h, 90):
                 cv2.line(frame, (0, i), (w, i), (10, 10, 20), 1)
 
-        text = tr("video.no_video")
         if Image:
             self._draw_text_pil(frame, text)
         elif cv2:
@@ -69,8 +70,18 @@ class NoVideoSource:
         ty = (h + th) // 2
         cv2.putText(frame, text, (tx, ty), font, 1.5, (80, 80, 80), 3)
 
-    def read(self) -> np.ndarray | None:
-        return self._build_frame()
+    def placeholder(self) -> np.ndarray:
+        """Return the shared, read-only frame for an inactive preview."""
+        text = tr("video.no_video")
+        if self._placeholder is None or text != self._placeholder_text:
+            frame = self._build_frame(text)
+            frame.flags.writeable = False
+            self._placeholder = frame
+            self._placeholder_text = text
+        return self._placeholder
+
+    def read(self) -> np.ndarray:
+        return self.placeholder().copy()
 
     def frame_age_ms(self) -> float:
         return 0.0

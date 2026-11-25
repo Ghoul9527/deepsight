@@ -27,6 +27,8 @@ class HostConfig:
         self.pi_address: str = n.get("pi_address", "127.0.0.1")
         self.pi_udp_port: int = n.get("pi_udp_port", 5100)
         self.pi_ws_port: int = n.get("pi_ws_port", 5101)
+        key_file = n.get("host_pairing_key_file")
+        self.host_pairing_key_file = self.config_path.parent / key_file if key_file else None
 
         go = data.get("gopro", {})
         self.gopro_pi_url: str = go.get("pi_url", "http://192.168.3.161:8080")
@@ -126,6 +128,9 @@ class HostConfig:
         dl = data.get("download", {})
         self.media_download_dir: str = dl.get(
             "media_dir", str(Path.home() / "DeepSight_Media"))
+        self.depth_recording_dir = Path(dl.get(
+            "depth_dir", self.config_path.parent.parent / "logs" / "depth",
+        )).expanduser()
 
         os.makedirs(self.log_dir, exist_ok=True)
         os.makedirs(self.media_download_dir, exist_ok=True)

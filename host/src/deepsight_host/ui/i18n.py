@@ -215,6 +215,8 @@ _translations: dict[str, dict[str, str]] = {
     "settings.lost_neutral": {"zh": "丢失回中时间", "en": "Lost Neutral Time"},
     "settings.log_level": {"zh": "日志级别", "en": "Log Level"},
     "settings.telemetry_record": {"zh": "遥测录制", "en": "Telemetry Record"},
+    "settings.depth_dir": {"zh": "深度数据文件夹", "en": "Depth Data Folder"},
+    "settings.choose_depth_dir": {"zh": "选择文件夹", "en": "Choose Folder"},
     "settings.off": {"zh": "关闭", "en": "Off"},
     "settings.on": {"zh": "开启", "en": "On"},
     "settings.reset_defaults": {"zh": "恢复默认", "en": "Reset Defaults"},

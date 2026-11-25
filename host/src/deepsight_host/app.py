@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import queue
 import sys
 import threading
@@ -32,6 +33,7 @@ from deepsight_host.control.controller import GameController, LockState
 from deepsight_host.control.auto_light import next_light_percent
 from deepsight_host.log_config.structured_logger import setup_logging
 from deepsight_host.log_config.telemetry_recorder import TelemetryRecorder
+from deepsight_host.log_config.depth_recording import DepthRecording
 from deepsight_host.diagnostics.startup_check import StartupCheck
 from deepsight_host.gopro import GoProClient
 from deepsight_host.ui.i18n import tr
@@ -85,6 +87,7 @@ class HostApp:
         self._ws = WsLink(
             self.config.ws_port,
             f"ws://{self.config.pi_address}:{self.config.pi_ws_port}/ws",
+            key_file=self.config.host_pairing_key_file,
         )
         self._registry = NodeRegistry()
         self._bus = MessageBus()
@@ -155,6 +158,11 @@ class HostApp:
 
         # Session recording
         self._recorder = TelemetryRecorder()
+        self._depth_recording = DepthRecording()
+        self._recording_lock = asyncio.Lock()
+        self._previous_videos: set[tuple[str, str, int]] | None = None
+        self._window.depth_recording_changed.connect(self._window.depth_chart.set_recording)
+        self._window.depth_recording_notice.connect(self._window.set_status_message)
 
         # Startup self-check
         self._startup_check = StartupCheck()
@@ -184,7 +192,6 @@ class HostApp:
         self._last_winch_direction: str | None = None
 
         # Motion state tracking for depth chart lifecycle
-        self._prev_motion_state: str = "descending"
         self._current_sim_speed: float = 0.0
 
         # Performance tracking
@@ -198,7 +205,6 @@ class HostApp:
         self._window.set_gimbal_mode("MANUAL")
 
         # Motion state → depth chart (mock V-profile)
-        self._window.motion_state.state_changed.connect(self._on_motion_state_changed)
         from deepsight_host.ui.mock_control import MockControlPanel
         self._mock_window = MockControlPanel()
         self._mock_window.setWindowTitle("Mock Motion Control")
@@ -285,6 +291,8 @@ class HostApp:
         self._window.gopro_load_preset.connect(self._on_load_preset)
 
         # Startup self-check wiring
+        if self._ws.registration_enabled:
+            self._startup_check.set_registration_check(lambda: self._ws.registered)
         self._startup_check.set_send_udp(
             lambda: self._schedule_async(
                 self._udp.send(sys_ping("host", 0))))
@@ -311,6 +319,7 @@ class HostApp:
         self._window.show()
         self._qt_app.aboutToQuit.connect(self._controller.stop)
         self._qt_app.aboutToQuit.connect(self._stop_video_on_exit)
+        self._qt_app.aboutToQuit.connect(self._depth_recording.stop)
         self._controller.start()
         self._mock_window.show()
         self._mock_window.start()
@@ -505,12 +514,16 @@ class HostApp:
             return fail_count
 
     def _process_frame(self):
+        if self._video_source is self._no_signal_source:
+            self._window.video_preview.update_frame(
+                self._no_signal_source.placeholder(), no_signal=True)
+            return
         frame = self._video_source.read()
         if frame is None:
             # Only show placeholder when stream is actually dead (>3s no frame)
             if (isinstance(self._video_source, StreamReceiver)
                     and self._video_source.stale()):
-                frame = self._no_signal_source.read()
+                frame = self._no_signal_source.placeholder()
                 self._window.video_preview.update_frame(frame, 0.0, no_signal=True)
                 self._window.dashboard.update_value("frame_brightness", None)
                 self._light_image_pct = None
@@ -755,7 +768,17 @@ class HostApp:
                 self._window.dashboard.update_depth(
                     float(p.get("depth_m", 0)), float(p.get("pressure_mbar", 0)),
                     float(p.get("temperature_c", 0)))
-                self._window.depth_chart.record_depth(float(p.get("depth_m", 0)))
+                if "depth_m" in p and math.isfinite(float(p["depth_m"])):
+                    self._window.depth_chart.record_depth(float(p["depth_m"]))
+                    try:
+                        self._depth_recording.sample(msg)
+                    except OSError as exc:
+                        logger.warning("Depth recording stopped after write error: %s", exc)
+                        try:
+                            self._depth_recording.stop()
+                        except OSError:
+                            logger.exception("Could not finalize interrupted depth recording")
+                        self._window.depth_recording_notice.emit(str(exc))
             elif msg_type == "tel.env":
                 self._window.dashboard.update_value("env_temp", float(p.get("temperature_c", 0)))
                 self._window.dashboard.update_value("humidity", float(p.get("humidity_pct", 0)))
@@ -801,10 +824,7 @@ class HostApp:
         elif action == "record_toggle":
             self._schedule_async(self._toggle_recording())
         elif action == "record":
-            if value == "1":
-                self._schedule_async(self._gopro.start_recording())
-            else:
-                self._schedule_async(self._gopro.stop_recording())
+            self._schedule_async(self._toggle_recording(value == "1"))
 
     async def _gopro_set_setting(self, setting: str, value: str):
         ok = await self._gopro.set_setting(setting, value)
@@ -831,21 +851,12 @@ class HostApp:
 
     # ── Game controller action handlers ──
 
-    def _on_motion_state_changed(self, state: str):
-        """Track motion state transitions for depth chart V-profile lifecycle."""
-        prev = self._prev_motion_state
-        self._prev_motion_state = state
-
-        if state == "descending":
-            self._window.depth_chart.start_session()
-        elif state == "hovering" and prev == "ascending":
-            self._window.depth_chart.end_dive(130.0)
-
     def _on_mock_state(self, state: str, speed_ms: float, depth_m: float):
         """Mock control panel tick → update motion state display + depth chart + Pi."""
         self._current_sim_speed = speed_ms
         self._window.motion_state.set_real_data(state, speed_ms, depth_m)
-        self._window.depth_chart.record_depth(depth_m)
+        if self.config.mock_enabled:
+            self._window.depth_chart.record_depth(depth_m)
         if speed_ms > 0:
             self._controller.set_plate_sign(-1.0)
         elif speed_ms < 0:
@@ -1024,23 +1035,66 @@ class HostApp:
         """B: toggle recording on/off."""
         self._schedule_async(self._toggle_recording())
 
-    async def _toggle_recording(self):
+    async def _toggle_recording(self, desired: bool | None = None):
+        async with self._recording_lock:
+            try:
+                status = await self._gopro.get_status()
+                start = not status.recording if desired is None else desired
+                if start:
+                    if status.recording:
+                        return
+                    # A recording stopped at the camera must not share its file
+                    # with the next recording started from the Host.
+                    previous = self._depth_recording.stop()
+                    if previous is not None:
+                        await self._finalize_depth_recording(previous)
+                    self._previous_videos = await self._camera_videos()
+                    await self._gopro.enable_wired_usb(True)
+                    if not await self._gopro.start_recording():
+                        logger.warning("Recording start failed")
+                        return
+                    self._window.depth_recording_changed.emit(True)
+                    self._depth_recording.start(self.config.depth_recording_dir)
+                    logger.info("GoPro and local depth recording started")
+                else:
+                    if status.recording and not await self._gopro.stop_recording():
+                        logger.warning("Recording stop failed")
+                        return
+                    path = self._depth_recording.stop()
+                    self._window.depth_recording_changed.emit(False)
+                    if await self._gopro.wait_until_idle(timeout=15.0):
+                        await self._gopro.start_viewfinder(port=8554)
+                    if path is not None:
+                        await self._finalize_depth_recording(path)
+            except Exception as exc:
+                logger.warning("Recording operation failed: %s", exc)
+                self._window.depth_recording_notice.emit(str(exc))
+
+    async def _camera_videos(self) -> set[tuple[str, str, int]] | None:
         try:
-            status = await self._gopro.get_status()
-            if status.recording:
-                ok = await self._gopro.stop_recording_and_wait()
-                logger.info("Recording stop/finalize: %s", "OK" if ok else "FAIL")
-                if ok:
-                    self._window.depth_chart.set_recording(False)
-                    await self._gopro.start_viewfinder(port=8554)
-            else:
-                await self._gopro.enable_wired_usb(True)
-                ok = await self._gopro.start_recording()
-                logger.info("Recording start: %s", "OK" if ok else "FAIL")
-                if ok:
-                    self._window.depth_chart.set_recording(True)
-        except Exception as e:
-            logger.warning("Record toggle failed: %s", e)
+            media = await self._gopro.list_media()
+            if media is not None:
+                return {(item["directory"], item["filename"], item["created"]) for item in media}
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            logger.warning("Could not read GoPro media list: %s", exc)
+        return None
+
+    async def _finalize_depth_recording(self, path):
+        candidates = set()
+        if self._previous_videos is not None:
+            for _ in range(5):
+                videos = await self._camera_videos()
+                if videos is not None:
+                    candidates = videos - self._previous_videos
+                    if candidates:
+                        break
+                await asyncio.sleep(0.5)
+        saved = self._depth_recording.finalize(path, sorted(candidates))
+        message = f"深度数据已保存：{saved.name}"
+        if saved == path:
+            message += "（GoPro 文件名未确认）"
+        self._window.depth_recording_notice.emit(message)
+        logger.info("Depth data saved to %s", saved)
 
     def _on_hud_toggle(self):
         """X: toggle HUD overlay."""

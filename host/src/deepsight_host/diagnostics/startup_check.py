@@ -38,6 +38,7 @@ class StartupCheck(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._send_udp: Callable | None = None
+        self._registration_check: Callable[[], bool] | None = None
         self._send_startup_check: Callable | None = None
         self._steps: list[Step] = []
         self._ping_seq = 0
@@ -49,6 +50,9 @@ class StartupCheck(QObject):
     def set_send_udp(self, fn: Callable):
         """Register the function used to send UDP ping to Pi."""
         self._send_udp = fn
+
+    def set_registration_check(self, fn: Callable[[], bool]):
+        self._registration_check = fn
 
     def set_send_startup_check(self, fn: Callable):
         """Register the function used to request Pi startup status."""
@@ -77,7 +81,27 @@ class StartupCheck(QObject):
             Step("pi_status", "Pi → Camera"),
             Step("video", "Video Preview"),
         ]
+        if self._registration_check is not None:
+            step = Step("registration", "上位机 IP 注册")
+            self._steps.insert(0, step)
+            step.status = "checking"
+            self.check_started.emit(step.name)
+            self._check_registration(step, time.monotonic() + 8)
+        else:
+            self._start_network_checks()
 
+    def _check_registration(self, step: Step, deadline: float):
+        if self._registration_check():
+            step.status, step.detail = "ok", "Pi 已确认回传地址"
+        elif time.monotonic() >= deadline:
+            step.status, step.detail = "fail", "未收到 Pi 注册确认"
+        else:
+            QTimer.singleShot(200, lambda: self._check_registration(step, deadline))
+            return
+        self.check_result.emit(step.name, step.status, step.detail)
+        self._start_network_checks()
+
+    def _start_network_checks(self):
         # Phase 1: UDP ping
         self._check_ping()
 
@@ -90,7 +114,7 @@ class StartupCheck(QObject):
         QTimer.singleShot(6000, self._check_video)
 
     def _check_ping(self):
-        step = self._steps[0]
+        step = self._steps[-3]
         step.status = "checking"
         self.check_started.emit(step.name)
 
@@ -110,7 +134,7 @@ class StartupCheck(QObject):
         self.check_result.emit(step.name, step.status, step.detail)
 
     def _check_pi_status(self):
-        step = self._steps[1]
+        step = self._steps[-2]
         if self._pi_startup_ok:
             step.status = "ok"
             step.detail = "GoPro ready"
@@ -120,7 +144,7 @@ class StartupCheck(QObject):
         self.check_result.emit(step.name, step.status, step.detail)
 
     def _check_video(self):
-        step = self._steps[2]
+        step = self._steps[-1]
         if self._got_frame:
             step.status = "ok"
             step.detail = "frames arriving"

@@ -18,9 +18,11 @@ class VideoDisplay:
         bytes_per_line = ch * w
 
         if ch == 3:
-            # BGR → RGB, deep-copy so QImage owns its data independently of numpy
-            rgb = frame[..., ::-1].copy()
-            qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
+            # QPixmap converts BGR888 to its own native-format pixel storage.
+            bgr = np.ascontiguousarray(frame)
+            if not bgr.flags.writeable:
+                bgr = bgr.copy()
+            qimg = QImage(bgr.data, w, h, bytes_per_line, QImage.Format_BGR888)
         elif ch == 1:
             qimg = QImage(frame.data, w, h, bytes_per_line, QImage.Format_Grayscale8).copy()
         elif ch == 4:

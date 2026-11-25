@@ -21,7 +21,8 @@ class VideoPreviewWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._raw_pixmap: QPixmap | None = None
-        self._last_frame: np.ndarray | None = None
+        self._placeholder_frame: np.ndarray | None = None
+        self._placeholder_aspect: tuple[int, int] | None = None
         self._frame_w: int = 0
         self._frame_h: int = 0
         self._target_aspect: tuple[int, int] | None = None
@@ -119,13 +120,22 @@ class VideoPreviewWidget(QWidget):
     def update_frame(self, frame: np.ndarray, fps: float = 0.0, latency_ms: float = 0.0, *, no_signal: bool = False):
         if frame is None:
             return
+        if (no_signal and self._placeholder_frame is frame
+                and self._placeholder_aspect == self._target_aspect
+                and self._raw_pixmap is not None and not self._raw_pixmap.isNull()):
+            return
+        self._placeholder_frame = frame if no_signal else None
+        self._placeholder_aspect = self._target_aspect
         self._frame_h, self._frame_w = frame.shape[:2]
 
         if self._target_aspect is not None:
             frame = self._crop_to_aspect(frame, self._target_aspect)
 
-        self._last_frame = frame.copy()
-        self._raw_pixmap = VideoDisplay.frame_to_pixmap(frame)
+        pixmap = VideoDisplay.frame_to_pixmap(frame)
+        if pixmap.isNull():
+            self._placeholder_frame = None
+            return
+        self._raw_pixmap = pixmap
         self._text_label.hide()
         self._scale_and_display()
 
@@ -273,8 +283,6 @@ class VideoPreviewWidget(QWidget):
         self._overlay_label.setText(text)
 
     def force_repaint(self):
-        if self._last_frame is not None:
-            self._raw_pixmap = VideoDisplay.frame_to_pixmap(self._last_frame)
         self._scale_and_display()
         self._video_label.update()
         self._video_label.repaint()
@@ -284,7 +292,7 @@ class VideoPreviewWidget(QWidget):
     def clear(self):
         self._video_label.setPixmap(QPixmap())
         self._raw_pixmap = None
-        self._last_frame = None
+        self._placeholder_frame = None
         self._text_label.setText(tr("video.no_video"))
         self._text_label.adjustSize()
         self._text_label.show()
