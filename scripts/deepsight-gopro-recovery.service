@@ -1,0 +1,15 @@
+[Unit]
+Description=DeepSight GoPro bounded USB recovery
+Wants=network-online.target deepsight-gopro-gateway.service
+After=network-online.target deepsight-gopro-gateway.service
+
+[Service]
+Type=simple
+Environment=GOPRO_IP=172.22.121.51
+ExecStart=/usr/bin/python3 /home/tony/deepsight/pi/src/deepsight_pi/hardware/gopro_recovery.py
+StateDirectory=deepsight-gopro-recovery
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

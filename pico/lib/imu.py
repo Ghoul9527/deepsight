@@ -56,7 +56,7 @@ class MPU6050Driver(IMUDriver):
         try:
             from machine import I2C, Pin
             self._i2c = I2C(
-                0,
+                config.IMU_I2C_BUS,
                 scl=Pin(config.IMU_I2C_SCL_PIN),
                 sda=Pin(config.IMU_I2C_SDA_PIN),
                 freq=config.IMU_I2C_FREQ,

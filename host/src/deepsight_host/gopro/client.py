@@ -1,24 +1,40 @@
-"""GoPro HTTP client — talks to GoPro through Pi TCP forward (Pi:8080→GoPro:8080)."""
+"""Open GoPro HTTP client for MISSION 1 PRO through the Pi gateway."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass
 
 import httpx
 
+from deepsight_host.gopro.profile import (
+    CAPTURE_MODE_IDS,
+    GENERAL_PRESET_GROUP,
+    LEGACY_PRESET_GROUPS,
+    MISSION_1_PRO_LABS_FIRMWARE,
+    MISSION_1_PRO_MIN_OPEN_GOPRO_FIRMWARE,
+    MISSION_1_PRO_MODEL,
+    CameraCompatibility,
+    firmware_version_tuple,
+    is_mission_1_pro,
+    normalize_model_name,
+)
 from deepsight_host.gopro.settings_decode import preset_summary
 
 logger = logging.getLogger("host.gopro")
 
 # Preset title names from GoPro API (int and string forms)
 PRESET_TITLES: dict = {
-    0: "Activity", 1: "Standard", 2: "Cinematic",
-    3: "Ultra Slo-Mo", 4: "Basic", 5: "5.3K 30", 6: "4K 60",
-    7: "1080p 120", 8: "HDR", 9: "Log", 10: "Video",
-    11: "Slo-Mo", 12: "Photo", 13: "Burst", 14: "Night",
-    15: "Time Lapse", 16: "Night Lapse", 17: "Star Trails",
-    18: "Light Painting", 19: "Vehicle Lights",
+    0: "Activity", 1: "Standard", 2: "Cinematic", 3: "Photo",
+    4: "Live Burst", 5: "Burst", 6: "Night", 7: "TimeWarp",
+    8: "Time Lapse", 9: "Night Lapse", 10: "Video", 11: "Slo-Mo",
+    33: "Looping", 46: "HDR", 48: "Log", 58: "Basic",
+    59: "Ultra Slo-Mo", 76: "Star Trails", 77: "Light Painting",
+    78: "Light Trail", 106: "Burst Slo-Mo", 131: "Time Lapse Video",
+    132: "Time Lapse Photo", 133: "Night Lapse Video",
+    134: "Night Lapse Photo", 143: "SuperView",
     # String enum variants from real GoPro API
     "PRESET_TITLE_ACTIVITY": "Activity",
     "PRESET_TITLE_STANDARD": "Standard",
@@ -71,6 +87,11 @@ class GoProStatus:
     model_name: str = ""
     busy: bool = False
     overheating: bool = False
+    remaining_video_time_s: int = 0
+    recording_duration_s: int = 0
+    sd_write_error: bool = False
+    sd_card_errors: int = 0
+    usb_connected: bool = False
 
 
 class GoProClient:
@@ -82,10 +103,19 @@ class GoProClient:
     the Pi's forwarded port.
     """
 
-    def __init__(self, base_url: str = "http://192.168.20.51:8080",
-                 real_host: str = "172.25.132.51"):
+    def __init__(
+        self,
+        base_url: str = "http://192.168.3.161:8080",
+        real_host: str = "172.25.132.51",
+        expected_model: str = MISSION_1_PRO_MODEL,
+        expected_labs_version: str = MISSION_1_PRO_LABS_FIRMWARE,
+        preset_order: list[str] | None = None,
+    ):
         self._base = base_url
         self._real_host = real_host
+        self._preset_order = preset_order or []
+        self._expected_model = expected_model
+        self._expected_labs_version = expected_labs_version
         self._client: httpx.AsyncClient | None = None
 
     async def open(self):
@@ -102,18 +132,46 @@ class GoProClient:
         """Check if GoPro is reachable."""
         return await self._get("/gopro/camera/state")
 
+    async def keep_alive(self) -> bool:
+        """Keep the Open GoPro control session alive."""
+        return await self._get("/gopro/camera/keep_alive")
+
+    async def claim_control(self, enable: bool = True) -> bool:
+        """Claim or release camera UI control for this external client."""
+        return await self._get(
+            "/gopro/camera/control/set_ui_controller", params={"p": 2 if enable else 0})
+
     # ── Shutter ──────────────────────────────────────
 
     async def start_recording(self) -> bool:
-        # HERO13 shutter: try GET first (per OpenAPI spec), then POST
-        if await self._get("/gopro/camera/shutter/start"):
-            return True
-        return await self._post("/gopro/camera/shutter/start")
+        if not await self.wait_until_idle():
+            return False
+        return await self._get("/gopro/camera/shutter/start")
 
     async def stop_recording(self) -> bool:
-        if await self._get("/gopro/camera/shutter/stop"):
+        return await self._get("/gopro/camera/shutter/stop")
+
+    async def stop_recording_and_wait(self, timeout: float = 15.0) -> bool:
+        """Stop recording and wait until the camera has finalized the file."""
+        status = await self.get_status()
+        if not status.recording and not status.busy:
             return True
-        return await self._post("/gopro/camera/shutter/stop")
+        if status.recording and not await self.stop_recording():
+            return False
+        return await self.wait_until_idle(timeout=timeout)
+
+    async def wait_until_idle(self, timeout: float = 10.0) -> bool:
+        """Wait for encoding and post-capture file activity to finish."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                status = await self.get_status()
+            except ConnectionError:
+                return False
+            if not status.recording and not status.busy:
+                return True
+            await asyncio.sleep(0.25)
+        return False
 
     # ── Stream ───────────────────────────────────────
 
@@ -124,7 +182,7 @@ class GoProClient:
         on the specified port.  With Pi SNAT, GoPro sees the Pi's USB IP
         as the source, so UDP goes to Pi:port.  Pi's socat relays to Host.
         """
-        return await self._get(f"/gopro/camera/stream/start?port={port}")
+        return await self._get("/gopro/camera/stream/start", params={"port": port})
 
     async def stop_viewfinder(self) -> bool:
         """Stop the camera's live preview stream."""
@@ -136,32 +194,90 @@ class GoProClient:
         Must be enabled before shutter/recording commands will work.
         """
         p = 1 if enable else 0
-        return await self._get(f"/gopro/camera/control/wired_usb?p={p}")
+        return await self._get("/gopro/camera/control/wired_usb", params={"p": p})
 
     # ── Presets ──────────────────────────────────────
 
     async def load_preset(self, preset_id: int) -> bool:
-        return await self._get(f"/gopro/camera/presets/load?id={preset_id}")
+        return await self._get("/gopro/camera/presets/load", params={"id": preset_id})
 
     async def load_preset_group(self, group_id: int) -> bool:
-        return await self._get(f"/gopro/camera/presets/set_group?id={group_id}")
+        return await self._get("/gopro/camera/presets/set_group", params={"id": group_id})
 
-    async def get_preset_status(self) -> dict | None:
+    async def get_preset_status(self, include_hidden: bool = False) -> dict | None:
         """Returns raw preset status from GoPro, or None."""
-        return await self._get_json("/gopro/camera/presets/get")
+        data = await self._get_json(
+            "/gopro/camera/presets/get",
+            params={"include-hidden": 1 if include_hidden else 0},
+        )
+        if data is None:
+            return None
+        if _first_present(data, "activePresetId", "active_preset_id") is None:
+            state = await self._get_json("/gopro/camera/state") or {}
+            status = state.get("status", state)
+            active = _safe_get(status, "97", None)
+            if active is not None:
+                data = dict(data)
+                data["activePresetId"] = active
+        if self._preset_order:
+            rank = {name: index for index, name in enumerate(self._preset_order)}
+            for group in data.get("presetGroupArray", []):
+                group.get("presetArray", []).sort(
+                    key=lambda p: rank.get(p.get("customName", ""), len(rank)))
+        return data
+
+    async def set_capture_mode(self, mode: str) -> bool:
+        """Switch a MISSION camera's top-level mode using its dynamic presets."""
+        mode = mode.lower()
+        if mode not in CAPTURE_MODE_IDS:
+            raise ValueError(f"Unsupported capture mode: {mode}")
+        data = await self.get_preset_status(include_hidden=True)
+        if data:
+            presets, _ = self.normalize_presets(data, target_group=GENERAL_PRESET_GROUP)
+            preferred = CAPTURE_MODE_IDS[mode]
+            for mode_id in preferred:
+                match = next((p for p in presets if _enum_int(p.get("mode")) == mode_id), None)
+                if match is not None:
+                    return await self.load_preset(int(match["id"]))
+        # Older cameras expose mode as separate preset groups. This fallback
+        # keeps the wrapper useful during bench tests with legacy fixtures.
+        return await self.load_preset_group(LEGACY_PRESET_GROUPS[mode])
+
+    async def ensure_video_mode(self) -> bool:
+        """Keep an existing MISSION video preset, switching only from non-video."""
+        data = await self.get_preset_status(include_hidden=True)
+        if data:
+            presets, active = self.normalize_presets(data, target_group=GENERAL_PRESET_GROUP)
+            current = next((preset for preset in presets if preset.get("id") == active), None)
+            if current is not None and _enum_int(current.get("mode")) in CAPTURE_MODE_IDS["video"]:
+                return True
+        return await self.set_capture_mode("video")
 
     # ── Settings ─────────────────────────────────────
 
     async def set_setting(self, setting_id: str | int, value: str) -> bool:
+        if not await self.wait_until_idle():
+            return False
         return await self._get(
-            f"/gopro/camera/setting?setting={setting_id}&option={value}")
+            "/gopro/camera/setting",
+            params={"setting": setting_id, "option": value},
+        )
 
     async def get_setting(self, setting_id: str | int) -> int | None:
         """Read current option value for a numeric setting ID."""
-        data = await self._get_json(
-            f"/gopro/camera/setting?setting={setting_id}")
-        if data:
-            return data.get("option")
+        queried = await self._get_json(
+            "/gopro/camera/setting", params={"setting": setting_id})
+        if queried is not None and queried.get("option") is not None:
+            return int(queried["option"])
+
+        # Some firmware versions omit query responses but include the value in
+        # camera state, so retain a read-only fallback.
+        data = await self.get_all_settings()
+        settings = data.get("settings", data.get("setting", {}))
+        if isinstance(settings, dict):
+            value = _safe_get(settings, str(setting_id), None)
+            if value is not None:
+                return int(value)
         return None
 
     async def get_all_settings(self) -> dict:
@@ -177,13 +293,13 @@ class GoProClient:
         Raises ConnectionError when the GoPro is unreachable so callers
         can detect offline state.
 
-        Status IDs (HERO13):
+        Status IDs (MISSION 1 PRO):
           2: internal_battery_bars (0-4)
           6: overheating (1=yes)
           8: busy (1=yes)
           10: encoding (1=recording)
           35: remaining_video_time_seconds
-          54: sd_card_remaining_bytes
+          54: sd_card_remaining_kilobytes
           70: internal_battery_pct (0-100)
         """
         data = await self._get_json("/gopro/camera/state")
@@ -194,23 +310,63 @@ class GoProClient:
         if battery_pct <= 0:
             battery_bars = int(_safe_get(status, '2', 0))
             battery_pct = float(battery_bars) / 4.0 * 100.0
-        sd_bytes = int(_safe_get(status, '54', 0))
+        sd_kb = int(_safe_get(status, '54', 0))
         return GoProStatus(
             recording=bool(int(_safe_get(status, '10', 0))),
             battery_pct=battery_pct,
-            storage_gb_free=float(sd_bytes) / 1e9 if sd_bytes > 0 else 0.0,
+            storage_gb_free=float(sd_kb) / 1e6 if sd_kb > 0 else 0.0,
             model_name=str(data.get("model_name", "")),
             busy=bool(int(_safe_get(status, '8', 0))),
             overheating=bool(int(_safe_get(status, '6', 0))),
+            remaining_video_time_s=int(_safe_get(status, '35', 0)),
+            recording_duration_s=int(_safe_get(status, '13', 0)),
+            sd_write_error=bool(int(_safe_get(status, '111', 0))),
+            sd_card_errors=int(_safe_get(status, '112', 0)),
+            usb_connected=bool(int(_safe_get(status, '115', 0))),
         )
 
     async def get_camera_info(self) -> dict:
         data = await self._get_json("/gopro/camera/info")
         return data if data else {}
 
+    async def get_capabilities(self) -> dict:
+        """Read the MISSION camera capability descriptor."""
+        return await self._get_json("/gopro/camera/capabilities") or {}
+
+    async def get_open_gopro_version(self) -> str:
+        data = await self._get_json("/gopro/version") or {}
+        return str(data.get("version", ""))
+
+    async def get_compatibility(self) -> CameraCompatibility:
+        """Inspect model, firmware and protocol without mutating the camera."""
+        info = await self.get_camera_info()
+        capabilities = await self.get_capabilities()
+        firmware = str(info.get("firmware_version", ""))
+        firmware_tuple = firmware_version_tuple(firmware)
+        minimum_tuple = firmware_version_tuple(MISSION_1_PRO_MIN_OPEN_GOPRO_FIRMWARE)
+        labs_tuple = firmware_version_tuple(self._expected_labs_version)
+        protocol = capabilities.get("protocol", {})
+        return CameraCompatibility(
+            model_name=str(info.get("model_name", "")),
+            firmware_version=firmware,
+            open_gopro_version=await self.get_open_gopro_version(),
+            capabilities_schema=str(capabilities.get("schemaVersion", "")),
+            supports_two_byte_ids=bool(protocol.get("supports_2byte_ids", False)),
+            model_supported=(
+                is_mission_1_pro(info.get("model_name", ""))
+                if is_mission_1_pro(self._expected_model)
+                else normalize_model_name(info.get("model_name", ""))
+                == normalize_model_name(self._expected_model)
+            ),
+            open_gopro_supported=bool(firmware_tuple and firmware_tuple >= minimum_tuple),
+            labs_version_current=bool(firmware_tuple and firmware_tuple >= labs_tuple),
+        )
+
     # ── Probe ────────────────────────────────────────
 
-    async def probe_setting(self, setting_id: str) -> dict:
+    async def probe_setting(
+        self, setting_id: str, probe_option: str = "65535"
+    ) -> dict:
         """Probe available options for a setting.
 
         Sends GET with probe option to trigger error-3 response
@@ -233,13 +389,34 @@ class GoProClient:
         current = await self.get_setting(sid)
         result["current_option"] = str(current) if current is not None else ""
 
-        # Use a known-invalid option to trigger error-3
-        ok = await self.set_setting(sid, "999")
-        if ok:
-            # The probe option was accepted — restore original
-            result["probe_changed"] = True
-            if current is not None:
-                await self.set_setting(sid, str(current))
+        if not self._client:
+            return result
+
+        try:
+            response = await self._client.get(
+                f"{self._base}/gopro/camera/setting",
+                params={"setting": sid, "option": probe_option},
+            )
+            payload = response.json() if response.content else {}
+            supported = payload.get("supported_options")
+            if isinstance(supported, list):
+                result["available"] = [
+                    {
+                        "id": option.get("id"),
+                        "name": option.get("display_name", str(option.get("id", ""))),
+                    }
+                    for option in supported if isinstance(option, dict)
+                ]
+            elif response.status_code == 403:
+                result["available"] = []
+            if response.status_code == 200:
+                # The probe value was accepted, so immediately restore the
+                # original option before returning to the UI.
+                result["probe_changed"] = True
+                if current is not None:
+                    await self.set_setting(sid, str(current))
+        except Exception as exc:
+            logger.debug("GoPro setting probe failed for %s: %s", sid, exc)
 
         return result
 
@@ -316,7 +493,9 @@ class GoProClient:
     # ── Preset helpers ───────────────────────────────
 
     @staticmethod
-    def normalize_presets(data: dict, target_group: int = 1000) -> tuple[list[dict], int]:
+    def normalize_presets(
+        data: dict, target_group: int = GENERAL_PRESET_GROUP
+    ) -> tuple[list[dict], int]:
         """Normalize preset status from GoPro API format.
 
         Returns (presets, active_preset_id).
@@ -331,6 +510,7 @@ class GoProClient:
         # Real GoPro API: {"presetGroupArray": [{id, presetArray, ...}]}
         groups = (data.get("presetGroupArray") or data.get("groups")
                   or data.get("preset_group_array") or [])
+        selected_group = None
         for g in groups:
             if not isinstance(g, dict):
                 continue
@@ -339,57 +519,61 @@ class GoProClient:
             if isinstance(gid, str):
                 gid = {"PRESET_GROUP_ID_VIDEO": 1000,
                        "PRESET_GROUP_ID_PHOTO": 1001,
-                       "PRESET_GROUP_ID_TIMELAPSE": 1002}.get(gid, -1)
+                       "PRESET_GROUP_ID_TIMELAPSE": 1002,
+                       "PRESET_GROUP_ID_GENERAL": 2000}.get(gid, -1)
             if gid == target_group:
-                raw = (g.get("presetArray") or g.get("preset_array")
-                       or g.get("presets") or [])
-                presets = [
-                    {
-                        "id": p.get("id", -1),
-                        "title": (
-                            p.get("customName") or p.get("title") or ""
-                            or _resolve_title(p.get("titleId") or p.get("title_id", -1))
-                        ),
-                        "title_id": p.get("titleId") or p.get("title_id", -1),
-                        "icon": p.get("icon", -1),
-                        "mode": p.get("mode", -1),
-                        "is_visible": p.get("is_visible", True),
-                        "setting_array": p.get("settingArray", []),
-                        "summary": preset_summary(p.get("settingArray", [])),
-                    }
-                    for p in raw if isinstance(p, dict)
-                ]
-                active = g.get("active_preset_id", -1)
-                return presets, active
+                selected_group = g
+                break
+        if selected_group is None and groups:
+            selected_group = next((g for g in groups if isinstance(g, dict)), None)
+        if selected_group is not None:
+            g = selected_group
+            raw = (g.get("presetArray") or g.get("preset_array")
+                   or g.get("presets") or [])
+            presets = [
+                {
+                    "id": p.get("id", -1),
+                    "title": (
+                        p.get("customName") or p.get("custom_name")
+                        or p.get("title")
+                        or _resolve_title(
+                            _first_present(p, "titleId", "title_id", default=-1))
+                    ),
+                    "title_id": _first_present(
+                        p, "titleId", "title_id", default=-1),
+                    "icon": p.get("icon", -1),
+                    "mode": p.get("mode", -1),
+                    "is_visible": bool(_first_present(
+                        p, "isVisible", "is_visible", default=1)),
+                    "setting_array": _first_present(
+                        p, "settingArray", "setting_array", default=[]),
+                    "summary": preset_summary(_first_present(
+                        p, "settingArray", "setting_array", default=[])),
+                }
+                for p in raw if isinstance(p, dict)
+            ]
+            active = _first_present(
+                g, "activePresetId", "active_preset_id", default=-1)
+            if active == -1:
+                active = _first_present(
+                    data, "activePresetId", "active_preset_id", default=-1)
+            return presets, active
 
         return [], -1
 
     # ── Internal ─────────────────────────────────────
 
-    async def _get(self, path: str) -> bool:
+    async def _get(self, path: str, params: dict | None = None) -> bool:
         if not self._client:
             return False
         try:
-            r = await self._client.get(f"{self._base}{path}")
+            r = await self._client.get(f"{self._base}{path}", params=params)
             if r.status_code != 200:
                 logger.info("GoPro HTTP %d: %s %s  body=%s",
                            r.status_code, "GET", path, r.text[:200] if r.text else "")
             return r.status_code == 200
         except Exception as e:
             logger.info("GoPro HTTP error: GET %s → %s", path, e)
-            return False
-
-    async def _post(self, path: str) -> bool:
-        if not self._client:
-            return False
-        try:
-            r = await self._client.post(f"{self._base}{path}")
-            if r.status_code != 200:
-                logger.info("GoPro HTTP %d: %s %s  body=%s",
-                           r.status_code, "POST", path, r.text[:200] if r.text else "")
-            return r.status_code == 200
-        except Exception as e:
-            logger.info("GoPro HTTP error: POST %s → %s", path, e)
             return False
 
     async def _get_bytes(self, path: str) -> bytes | None:
@@ -403,11 +587,11 @@ class GoProClient:
             logger.debug("GoPro HTTP bytes error: %s → %s", path, e)
         return None
 
-    async def _get_json(self, path: str) -> dict | None:
+    async def _get_json(self, path: str, params: dict | None = None) -> dict | None:
         if not self._client:
             return None
         try:
-            r = await self._client.get(f"{self._base}{path}")
+            r = await self._client.get(f"{self._base}{path}", params=params)
             if r.status_code == 200:
                 return r.json()
         except Exception as e:
@@ -419,3 +603,38 @@ def _safe_get(d, key, default):
     if isinstance(d, dict):
         return d.get(key, default)
     return getattr(d, key, default)
+
+
+def _first_present(d: dict, *keys: str, default=None):
+    for key in keys:
+        if key in d and d[key] is not None:
+            return d[key]
+    return default
+
+
+def _enum_int(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        if value.lstrip("-").isdigit():
+            return int(value)
+        names = {
+            "FLAT_MODE_VIDEO": 12,
+            "FLAT_MODE_TIME_LAPSE_VIDEO": 13,
+            "FLAT_MODE_PHOTO_SINGLE": 16,
+            "FLAT_MODE_PHOTO": 17,
+            "FLAT_MODE_PHOTO_NIGHT": 18,
+            "FLAT_MODE_PHOTO_BURST": 19,
+            "FLAT_MODE_TIME_LAPSE_PHOTO": 20,
+            "FLAT_MODE_NIGHT_LAPSE_PHOTO": 21,
+            "FLAT_MODE_TIME_WARP_VIDEO": 24,
+            "FLAT_MODE_NIGHT_LAPSE_VIDEO": 26,
+            "FLAT_MODE_SLOMO": 27,
+            "FLAT_MODE_VIDEO_STAR_TRAIL": 29,
+            "FLAT_MODE_VIDEO_LIGHT_PAINTING": 30,
+            "FLAT_MODE_VIDEO_LIGHT_TRAIL": 31,
+            "FLAT_MODE_VIDEO_BURST_SLOMO": 32,
+            "FLAT_MODE_VIDEO_LOW_LIGHT": 36,
+        }
+        return names.get(value)
+    return None

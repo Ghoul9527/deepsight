@@ -34,9 +34,9 @@ dprint("gc_bridge: pid=\(getpid())")
 func pollGamepad(_ gp: GCExtendedGamepad) {
     let axes: [Double] = [
         Double(max(-1, min(1, gp.leftThumbstick.xAxis.value))),
-        Double(max(-1, min(1, gp.leftThumbstick.yAxis.value))),
+        Double(-max(-1, min(1, gp.leftThumbstick.yAxis.value))),
         Double(max(-1, min(1, gp.rightThumbstick.xAxis.value))),
-        Double(max(-1, min(1, gp.rightThumbstick.yAxis.value))),
+        Double(-max(-1, min(1, gp.rightThumbstick.yAxis.value))),
         Double(max(-1, min(1, gp.leftTrigger.value))),
         Double(max(-1, min(1, gp.rightTrigger.value))),
     ]
@@ -61,74 +61,45 @@ func pollGamepad(_ gp: GCExtendedGamepad) {
 
     let axStr = axes.map { String(format: "%.4f", $0) }.joined(separator: ",")
     let btnStr = btns.map { String($0) }.joined(separator: ",")
-    let line = "{\"ts\":\(String(format: "%.3f", Date().timeIntervalSince1970)),\"axes\":[\(axStr)],\"buttons\":[\(btnStr)],\"hat\":[\(hatX),\(hatY)]}"
+    let line = "{\"ts\":\(String(format: "%.3f", Date().timeIntervalSince1970)),\"connected\":true,\"axes\":[\(axStr)],\"buttons\":[\(btnStr)],\"hat\":[\(hatX),\(hatY)]}"
     line.withCString { fputs($0, stdout); fputc(10, stdout) }
     fflush(stdout)
-    // Also write to file for open-launched testing
-    if let fh = FileHandle(forWritingAtPath: "/tmp/gc_bridge_output.txt") {
-        fh.seekToEndOfFile()
-        (line + "\n").withCString { fh.write(Data(bytes: $0, count: Int(strlen($0)))) }
-    }
+
 }
 
 // ── App Delegate ───────────────────────────────────────────────────────
 final class BridgeDelegate: NSObject, NSApplicationDelegate {
     var pollTimer: Timer?
-    var connectObserver: NSObjectProtocol?
+    var observers: [NSObjectProtocol] = []
+    var controller: GCController?
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        // Visible window — GCController may need a window to receive events
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: true
-        )
-        win.title = "DeepSight GC Bridge"
-        win.level = .floating
-        win.orderFrontRegardless()
-
-        // Check for already-connected controller
-        let controllers = GCController.controllers()
-        dprint("controllers().count = \(controllers.count)")
-        if let c = controllers.first, let gp = c.extendedGamepad {
-            dprint("HAS_CONTROLLER: \(c.vendorName ?? "?")")
-            startPolling(gp)
-            return
+        for event in [Notification.Name.GCControllerDidConnect, .GCControllerDidDisconnect] {
+            observers.append(NotificationCenter.default.addObserver(
+                forName: event, object: nil, queue: .main
+            ) { [weak self] _ in self?.refreshController() })
         }
-
-        // Wait for connection
-        dprint("WAITING for controller...")
-        connectObserver = NotificationCenter.default.addObserver(
-            forName: .GCControllerDidConnect, object: nil, queue: .main
-        ) { [weak self] n in
-            guard let self,
-                  let c = n.object as? GCController,
-                  let gp = c.extendedGamepad,
-                  self.pollTimer == nil else { return }
-            dprint("CONNECTED: \(c.vendorName ?? "?")")
-            self.startPolling(gp)
-        }
-        GCController.startWirelessControllerDiscovery()
-    }
-
-    func startPolling(_ gp: GCExtendedGamepad) {
-        if let obs = connectObserver {
-            NotificationCenter.default.removeObserver(obs)
-            connectObserver = nil
-        }
-        dprint("POLLING...")
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.004, repeats: true) { _ in
-            pollGamepad(gp)
+        refreshController()
+        // Always emit heartbeat, including when unplugged, so Host can distinguish
+        // a missing device from a hung helper and detect USB reconnection.
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.004, repeats: true) { [weak self] _ in
+            if let gp = self?.controller?.extendedGamepad {
+                pollGamepad(gp)
+            } else {
+                print("{\"connected\":false,\"axes\":[0,0,0,0,0,0],\"buttons\":[0,0,0,0,0,0,0,0,0,0,0,0,0],\"hat\":[0,0]}")
+                fflush(stdout)
+            }
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+    func refreshController() {
+        controller = GCController.controllers().first { $0.extendedGamepad != nil }
+        dprint("Controller: \(controller?.vendorName ?? "disconnected")")
     }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────
+// Host owns the foreground window; this helper must receive background input.
+GCController.shouldMonitorBackgroundEvents = true
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let delegate = BridgeDelegate()

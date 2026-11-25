@@ -14,12 +14,22 @@ servo:
 imu:
   mock: true
   i2c_address: 0x68     # MPU6050
+  i2c_bus: 0
+  sda_pin: 20
+  scl_pin: 21
+  i2c_freq: 100000
 
 pressure:
   mock: true
   i2c_address: 0x76     # MS5837
+  i2c_bus: 1
+  sda_pin: 18
+  scl_pin: 19
+  i2c_freq: 10000
+  internal_pullup: true
 
 bme280:
+  enabled: false
   mock: true
   i2c_address: 0x77
 

@@ -3,7 +3,7 @@
 # Runs on Pi (or NanoPi/OpenWrt). Enables Host ↔ GoPro routing.
 #
 # Usage: sudo ./setup_gopro_gateway.sh [host_ip] [gopro_ip] [udp_port]
-#   host_ip  - Host computer IP (default: 192.168.20.50)
+#   host_ip  - Host computer IP (default: 192.168.3.158)
 #   gopro_ip - GoPro USB Ethernet IP (default: auto-detect)
 #   udp_port - UDP stream port (default: 8554)
 #
@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-HOST_IP="${1:-192.168.20.50}"
+HOST_IP="${1:-192.168.3.158}"
 GOPRO_IP="${2:-}"
 UDP_PORT="${3:-8554}"
 
@@ -32,9 +32,34 @@ detect_gopro_iface() {
 }
 
 detect_gopro_ip() {
-    # GoPro is the DHCP server on USB Ethernet — it's the gateway of the 172.x subnet.
-    # Typically 172.25.132.51, 172.28.128.51, or 172.20.16.51.
-    for candidate in 172.25.132.51 172.28.128.51 172.20.16.51 172.20.17.51 172.20.18.51 172.20.19.51; do
+    # Prefer the official _gopro-web mDNS service when avahi is installed.
+    if command -v avahi-browse >/dev/null 2>&1; then
+        local mdns_ip
+        mdns_ip=$(avahi-browse -rtp _gopro-web._tcp 2>/dev/null \
+            | awk -F';' '$1 == "=" && $8 ~ /^172\./ {print $8; exit}')
+        if [ -n "${mdns_ip:-}" ]; then
+            echo "$mdns_ip"
+            return 0
+        fi
+    fi
+
+    # USB addresses are 172.2X.1YZ.51. Derive the /24 from the address
+    # assigned to the detected USB interface instead of carrying a model-
+    # specific list of addresses.
+    local local_ip prefix candidate
+    local_ip=$(ip -4 -o addr show "$GOPRO_IFACE" 2>/dev/null \
+        | awk '{print $4}' | cut -d/ -f1 | grep '^172\.' | head -1)
+    prefix=${local_ip%.*}
+    candidate="${prefix}.51"
+    if [ -n "${prefix:-}" ] && curl -s --connect-timeout 2 \
+        "http://${candidate}:8080/gopro/camera/info" >/dev/null 2>&1; then
+        echo "$candidate"
+        return 0
+    fi
+
+    # Last resort: probe populated neighbors on the GoPro USB interface.
+    for candidate in $(ip neigh show dev "$GOPRO_IFACE" 2>/dev/null \
+        | awk '$1 ~ /^172\./ {print $1}'); do
         if curl -s --connect-timeout 2 "http://${candidate}:8080/gopro/camera/state" >/dev/null 2>&1; then
             echo "$candidate"
             return 0

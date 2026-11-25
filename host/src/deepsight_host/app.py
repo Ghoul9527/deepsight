@@ -10,7 +10,7 @@ import threading
 import time
 
 import numpy as np
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QDir, QLockFile, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
@@ -24,10 +24,12 @@ from deepsight_host.tracking.registry import get_tracker
 from deepsight_host.video.file_source import FileVideoSource
 from deepsight_host.video.no_video_source import NoVideoSource
 from deepsight_host.video.stream_receiver import StreamReceiver
+from deepsight_host.video.brightness import average_brightness_pct
 from deepsight_host.control.framer import Framer
 from deepsight_host.control.servo_mapper import ServoMapper
 from deepsight_host.control.pid import PIDController
 from deepsight_host.control.controller import GameController, LockState
+from deepsight_host.control.auto_light import next_light_percent
 from deepsight_host.log_config.structured_logger import setup_logging
 from deepsight_host.log_config.telemetry_recorder import TelemetryRecorder
 from deepsight_host.diagnostics.startup_check import StartupCheck
@@ -38,7 +40,7 @@ from enum import Enum
 
 from deepsight_shared.constants import SafetyState
 from deepsight_shared.protocol import (
-    make_heartbeat, cmd_servo_set, cmd_winch_set, sys_safety, sys_ping,
+    make_heartbeat, cmd_servo_set, cmd_winch_set, sys_safety, sys_ping, new_message,
     cmd_startup_check, Message,
 )
 
@@ -66,6 +68,7 @@ class HostApp:
                               "Hiragino Sans GB", ".AppleSystemUIFont"])
         self._qt_app.setFont(app_font)
         self._window = MainWindow()
+        self._window.configure_pi_shutdown(self.config.pi_address, self.config.pi_ssh_user)
         self._window.set_config(self.config)
 
         # Async event loop (runs in background thread for network I/O)
@@ -105,13 +108,8 @@ class HostApp:
         else:
             self._video_source = self._no_signal_source
 
-        # Tracking
-        self._tracker = get_tracker(
-            self.config.tracking_mode,
-            confidence_threshold=self.config.confidence_threshold,
-            iou_threshold=self.config.iou_threshold,
-            model_path=self.config.model_path,
-        )
+        # Lazy tracking: manual preview must not construct or run a detector.
+        self._tracker = None
 
         # Control pipeline — tuned PID for smooth gimbal tracking
         from deepsight_host.control.pid import PIDGains
@@ -144,8 +142,14 @@ class HostApp:
 
         # GoPro HTTP client (via Pi TCP forward, Host header = GoPro real IP)
         self._gopro = GoProClient(
-            self.config.gopro_pi_url, self.config.gopro_real_host)
+            self.config.gopro_pi_url,
+            self.config.gopro_real_host,
+            preset_order=self.config.gopro_preset_order,
+            expected_model=self.config.gopro_model,
+            expected_labs_version=self.config.gopro_expected_labs_version,
+        )
         self._gopro_online = False
+        self._gopro_compatibility_checked = False
         self._window.setup_media_services(
             self._gopro, self._schedule_async, self.config.media_download_dir)
 
@@ -186,6 +190,7 @@ class HostApp:
         # Performance tracking
         self._frame_count = 0
         self._fps_ema = 0.0
+        self._last_preview_update: float | None = None
         self._last_fps_update = time.monotonic()
         self._pi_stream_latency_ms: float = 0.0  # PCR-based GoPro→Pi latency
 
@@ -237,6 +242,17 @@ class HostApp:
         self._controller.gimbal_pitch_changed.connect(self._on_gimbal_pitch)
         self._controller.gimbal_yaw_changed.connect(self._on_gimbal_yaw)
         self._controller.light_level_changed.connect(self._on_light_level)
+        self._light_requested_pct = None
+        self._light_actual_pct = None
+        self._light_auto = False
+        self._light_image_pct = None
+        self._light_last_auto = 0.0
+        self._window.lighting.manual_changed.connect(self._on_light_manual)
+        self._window.lighting.auto_changed.connect(self._on_light_auto)
+        self._window.lighting.auto.setChecked(True)
+        self._lighting_timer = QTimer(self._qt_app)
+        self._lighting_timer.timeout.connect(self._refresh_lighting)
+        self._lighting_timer.start(100)
         self._controller.roll_trim_changed.connect(self._on_roll_trim)
 
         # Gamepad connection status
@@ -263,6 +279,8 @@ class HostApp:
         # GoPro commands → direct HTTP through Pi proxy
         self._window.gopro_command.connect(self._on_gopro_command)
         self._window.gopro_probe.connect(self._on_gopro_probe)
+        self._roll_horizon_locked = False
+        self._window.gopro_presets_loaded.connect(self._sync_horizon_roll_lock)
         self._window.gopro_get_presets.connect(self._on_get_presets)
         self._window.gopro_load_preset.connect(self._on_load_preset)
 
@@ -291,6 +309,8 @@ class HostApp:
         self._telemetry_timer.start(50)  # drain incoming queue at 20 Hz
 
         self._window.show()
+        self._qt_app.aboutToQuit.connect(self._controller.stop)
+        self._qt_app.aboutToQuit.connect(self._stop_video_on_exit)
         self._controller.start()
         self._mock_window.show()
         self._mock_window.start()
@@ -306,21 +326,53 @@ class HostApp:
         stream_ok = bool(self.config.stream_url)
         parts = [
             "Tracking: %s" % self.config.tracking_mode.upper(),
-            "Model: %s" % ("LOADED" if model_ok else "UNAVAILABLE"),
+            "Model: %s" % ("LOADED" if model_ok else "NOT LOADED (MANUAL)"),
             "Stream: %s" % ("LIVE" if stream_ok else "NONE"),
         ]
         self._window.set_status_message(" | ".join(parts))
 
         return self._qt_app.exec()
 
+    def _stop_video_on_exit(self):
+        """Release the UDP decoder before the async thread exits."""
+        if isinstance(self._video_source, StreamReceiver):
+            try:
+                self._schedule_async(self._video_source.stop()).result(timeout=5)
+            except Exception:
+                logger.exception("Could not stop video receiver on exit")
+
     def _update_tracking_status(self):
-        mode = self.config.tracking_mode.upper()
-        if mode == "OFF":
-            self._window.tracking_view.set_status("OFF - Tracking Disabled")
+        active = self._gimbal_mode == GimbalMode.AUTO and self._tracker is not None
+        self._window.tracking_view.set_tracking_active(active)
+        if not active:
+            self._window.tracking_view.set_status(tr("tracking.manual_idle"))
+            self._window.tracking_view.set_preview_metrics(self._fps_ema)
             return
+        mode = self.config.tracking_mode.upper()
         is_mock = getattr(self._tracker, 'is_mock', True)
         status = f"{mode} - Model Unavailable" if is_mock else f"{mode} - Model Active"
+        if not is_mock:
+            status += f" · {getattr(self._tracker, 'backend_label', '')}"
         self._window.tracking_view.set_status(status)
+
+    def _load_tracker(self):
+        return get_tracker(self.config.tracking_mode,
+            confidence_threshold=self.config.confidence_threshold,
+            iou_threshold=self.config.iou_threshold,
+            model_path=self.config.model_path,
+            inference_backend=self.config.inference_backend,
+            coreml_model_path=self.config.coreml_model_path)
+
+    def _deactivate_tracking(self):
+        was_active = self._gimbal_mode == GimbalMode.AUTO or self._tracker is not None
+        self._gimbal_mode = GimbalMode.MANUAL
+        self._tracker = None
+        self._framer.reset()
+        self._window.set_gimbal_mode("MANUAL")
+        self._window.set_tracking_status("none")
+        self._update_tracking_status()
+        if was_active:
+            logger.info("Tracking stopped: detector released; no YOLO inference in MANUAL")
 
     async def _network_loop(self):
         await self._udp.start()
@@ -366,16 +418,41 @@ class HostApp:
             try:
                 online = self._gopro_online
                 if online:
+                    await self._fetch_presets()
                     if not video_mode_set:
                         await self._gopro.enable_wired_usb(True)
-                        ok = await self._gopro.load_preset_group(1000)  # video
-                        logger.info("GoPro USB control + video preset: %s", "OK" if ok else "FAIL")
-                        video_mode_set = True
+                        await self._gopro.claim_control(True)
+                        if not self._gopro_compatibility_checked:
+                            compatibility = await self._gopro.get_compatibility()
+                            logger.info(
+                                "GoPro compatibility: model=%s firmware=%s OpenGoPro=%s "
+                                "capabilities=%s two_byte_ids=%s Labs_current=%s",
+                                compatibility.model_name,
+                                compatibility.firmware_version,
+                                compatibility.open_gopro_version,
+                                compatibility.capabilities_schema,
+                                compatibility.supports_two_byte_ids,
+                                compatibility.labs_version_current,
+                            )
+                            if not compatibility.ready:
+                                logger.warning(
+                                    "Expected MISSION 1 PRO with Open GoPro firmware >=1.10.00")
+                            self._gopro_compatibility_checked = True
+                        ok = await self._gopro.ensure_video_mode()
+                        logger.info("GoPro USB control + MISSION video mode: %s",
+                                    "OK" if ok else "FAIL")
+                        video_mode_set = ok
+                    if (stream_started and isinstance(self._video_source, StreamReceiver)
+                            and self._video_source.stale(threshold=10)):
+                        logger.warning("Preview stalled for >10s; retrying camera stream start")
+                        stream_started = False
                     if not stream_started:
                         logger.info("GoPro detected, starting viewfinder stream...")
-                        await self._gopro.start_viewfinder(port=8554)
-                        stream_started = True
-                        logger.info("GoPro viewfinder stream started (UDP → Pi:8554)")
+                        stream_started = bool(await self._gopro.start_viewfinder(port=8554))
+                        if stream_started:
+                            logger.info("GoPro viewfinder stream started (UDP → Pi:8554)")
+                        else:
+                            logger.warning("GoPro stream start failed; retry on next lifecycle check")
                 elif not online:
                     if stream_started:
                         logger.warning("GoPro disconnected, will restart on reconnect")
@@ -402,6 +479,7 @@ class HostApp:
 
     async def _do_gopro_status_poll(self, fail_count: int = 0) -> int:
         try:
+            await self._gopro.keep_alive()
             status = await self._gopro.get_status()
             self._gopro_online = True
             self._window.gopro_status_updated.emit({
@@ -411,6 +489,12 @@ class HostApp:
                 "sd_remaining_bytes": int(status.storage_gb_free * 1e9),
                 "model_name": status.model_name,
                 "busy": status.busy,
+                "overheating": status.overheating,
+                "remaining_video_time_s": status.remaining_video_time_s,
+                "recording_duration_s": status.recording_duration_s,
+                "sd_write_error": status.sd_write_error,
+                "sd_card_errors": status.sd_card_errors,
+                "usb_connected": status.usb_connected,
             })
             return 0
         except Exception:
@@ -428,8 +512,20 @@ class HostApp:
                     and self._video_source.stale()):
                 frame = self._no_signal_source.read()
                 self._window.video_preview.update_frame(frame, 0.0, no_signal=True)
+                self._window.dashboard.update_value("frame_brightness", None)
+                self._light_image_pct = None
             # If stream is not stale, keep showing the last good frame (skip)
             return
+
+        now = time.monotonic()
+        if now - getattr(self, '_last_brightness_update', -float('inf')) >= 0.5:
+            preview = self._window.video_preview
+            brightness_frame = frame
+            if preview._target_aspect is not None:
+                brightness_frame = preview._crop_to_aspect(frame, preview._target_aspect)
+            self._light_image_pct = average_brightness_pct(brightness_frame)
+            self._window.dashboard.update_value("frame_brightness", self._light_image_pct)
+            self._last_brightness_update = now
 
         if not self._first_frame_seen:
             self._first_frame_seen = True
@@ -439,7 +535,8 @@ class HostApp:
         t0 = time.monotonic()
 
         # Tracking
-        if self._tracker is not None:
+        tracking_active = self._gimbal_mode == GimbalMode.AUTO and self._tracker is not None
+        if tracking_active:
             result = self._tracker.process_frame(frame)
             track_latency = (time.monotonic() - t0) * 1000.0
         else:
@@ -448,7 +545,7 @@ class HostApp:
 
         # Draw overlay on frame — use Kalman-predicted position during loss
         kalman_pos = self._framer.predicted_position if (
-            self._tracker is not None
+            tracking_active
         ) else None
         self._draw_overlay(frame, result, kalman_pos)
 
@@ -464,8 +561,8 @@ class HostApp:
         elif self._framer.safety_state == SafetyState.CAUTION:
             # Kalman timed out — fully lost
             self._window.set_tracking_status("none")
-            self._gimbal_mode = GimbalMode.MANUAL
-            self._window.set_gimbal_mode("MANUAL")
+            self._deactivate_tracking()
+            result = None
             logger.info("Kalman timeout — switching to MANUAL, no target")
         else:
             # Kalman is predicting (DEGRADED or NOMINAL with lost target)
@@ -491,10 +588,7 @@ class HostApp:
             )
         else:
             angles = self._framer.current_angles
-            self._recorder.record_tracking(
-                track_id=-1, confidence=0.0,
-                center_x=0.5, center_y=0.5, lost=True,
-            )
+
 
         # Gimbal control: per-axis AUTO/MANUAL mode
         #   AUTO:  YOLO controls that axis (unless gamepad overrides)
@@ -510,8 +604,15 @@ class HostApp:
         # Update video display (with end-to-end latency)
         self._window.video_preview.update_frame(frame, self._fps_ema, ee_latency)
 
-        # FPS calculation (EMA)
         now = time.monotonic()
+        if isinstance(self._video_source, StreamReceiver):
+            if self._last_preview_update is not None:
+                gap = now - self._last_preview_update
+                if gap >= 1.0:
+                    logger.warning("Live preview frame gap: %.3fs", gap)
+            self._last_preview_update = now
+
+        # FPS calculation (EMA)
         if now - self._last_fps_update > 1.0:
             instant_fps = self._frame_count / max(now - self._last_fps_update, 0.001)
             self._fps_ema = self._fps_ema * 0.7 + instant_fps * 0.3
@@ -519,7 +620,9 @@ class HostApp:
             self._last_fps_update = now
 
         # Update dashboard & tracking metrics
-        if result and result.visible:
+        if not tracking_active or self._gimbal_mode == GimbalMode.MANUAL:
+            self._window.tracking_view.set_preview_metrics(self._fps_ema)
+        elif result and result.visible:
             self._window.tracking_view.set_metrics(
                 fps=self._fps_ema,
                 latency_ms=track_latency,
@@ -527,10 +630,6 @@ class HostApp:
                 confidence=result.confidence,
                 pan=angles.pan,
                 tilt=angles.tilt,
-            )
-            self._window.dashboard.update_tracking(
-                result.center_x, result.center_y,
-                result.confidence, result.track_id,
             )
         elif result and result.lost:
             self._window.tracking_view.set_metrics(
@@ -629,6 +728,14 @@ class HostApp:
             self._window.component_status.update_component(
                 node_id, info.state, elapsed, f"State: {info.state.value}")
 
+        driver = getattr(self, '_actuator_status', None)
+        if driver is not None:
+            seen, healthy, detail = driver
+            elapsed = time.monotonic() - seen
+            state = (SafetyState.SAFE if elapsed > 3 else
+                     SafetyState.NOMINAL if healthy else SafetyState.EMERGENCY)
+            self._window.component_status.update_component("pca9685", state, elapsed, detail)
+
     def _process_telemetry(self):
         """Drain incoming message queue and dispatch to UI (runs on Qt main thread)."""
         while True:
@@ -656,12 +763,21 @@ class HostApp:
             elif msg_type == "tel.leak":
                 ch = int(p.get("channel", 0))
                 wet = bool(p.get("wet", False))
-                self._window.dashboard.update_value(f"leak_ch{ch}", "WET" if wet else "DRY")
+                self._window.dashboard.update_leak(msg.node_id, ch, wet)
             elif msg_type == "tel.winch_state":
                 self._window.dashboard.update_winch(
                     float(p.get("position_mm", 0)), float(p.get("speed_mm_s", 0)),
                     bool(p.get("limit_top", False)), bool(p.get("limit_bottom", False)))
             elif msg_type == "tel.pi_status":
+                if "actuator_ok" in p:
+                    self._actuator_status = (time.monotonic(), bool(p["actuator_ok"]),
+                                             str(p.get("actuator_error") or "PCA9685 connected"))
+                self._light_actual_pct = p.get("light_pwm_pct")
+                self._window.dashboard.update_value("light_pwm", self._light_actual_pct)
+                if self._light_requested_pct is None and self._light_actual_pct is not None:
+                    self._light_requested_pct = float(self._light_actual_pct)
+                    self._window.lighting.set_percent(self._light_requested_pct)
+                    self._controller._light_level = round(self._light_requested_pct / 10)
                 self._window.dashboard.update_value("pi_cpu_temp", float(p.get("cpu_temp_c", 0)))
                 self._window.dashboard.update_value("pi_cpu", float(p.get("cpu_pct", 0)))
                 self._window.dashboard.update_value("pi_mem", float(p.get("memory_pct", 0)))
@@ -679,9 +795,7 @@ class HostApp:
         if action == "setting":
             self._schedule_async(self._gopro_set_setting(setting, value))
         elif action == "preset_group":
-            group_map = {"video": 0, "photo": 1, "timelapse": 2}
-            gid = group_map.get(value, 0)
-            self._schedule_async(self._gopro.load_preset_group(gid))
+            self._schedule_async(self._gopro.set_capture_mode(value))
         elif action == "get_settings":
             self._schedule_async(self._fetch_gopro_settings())
         elif action == "record_toggle":
@@ -695,18 +809,22 @@ class HostApp:
     async def _gopro_set_setting(self, setting: str, value: str):
         ok = await self._gopro.set_setting(setting, value)
         self._window.gopro_setting_result.emit(setting, value, ok, None)
+        if ok:
+            await self._fetch_gopro_settings()
 
     async def _fetch_gopro_settings(self):
         data = await self._gopro.get_all_settings()
         if data:
-            self._window.gopro_settings_loaded.emit(data)
+            settings = data.get("settings", data.get("setting", data))
+            if isinstance(settings, dict):
+                self._window.gopro_settings_loaded.emit(settings)
 
     def _on_gopro_probe(self, setting: str, probe_option: str):
         """Probe available options for a setting without permanently changing it."""
         self._schedule_async(self._gopro_probe_setting(setting, probe_option))
 
     async def _gopro_probe_setting(self, setting: str, probe_option: str):
-        result = await self._gopro.probe_setting(setting)
+        result = await self._gopro.probe_setting(setting, probe_option)
         self._window.gopro_probe_result.emit(
             result["setting"], result["current_option"],
             result["available"], result["probe_changed"])
@@ -767,14 +885,59 @@ class HostApp:
 
     def _on_roll_trim(self, angle: float):
         """Roll gimbal trim from D-pad L/R. angle = 0..180 deg."""
-        self._send_servo(2, float(angle))
+        if self._roll_horizon_locked:
+            self._controller._roll_angle = 90.0
+            return
+        limit = self.config.gimbal_roll_max_angle
+        angle = max(90.0 - limit, min(90.0 + limit, float(angle)))
+        self._controller._roll_angle = angle
+        self._send_servo(2, angle)
 
     def _on_light_level(self, level: int):
-        """Light brightness step from LT/RT triggers. level = 0..10."""
-        brightness = level / 10.0
-        logger.info("Light: %d0%%", level)
+        # Physical triggers explicitly return to manual control.
+        self._window.lighting.auto.setChecked(False)
+        self._on_light_manual(level * 10)
+
+    def _on_light_manual(self, percent: int):
+        self._light_requested_pct = max(0.0, min(100.0, float(percent)))
+        self._window.lighting.set_percent(self._light_requested_pct)
+        self._controller._light_level = round(self._light_requested_pct / 10)
+
+    def _on_light_auto(self, enabled: bool):
+        self._light_auto = enabled
+        logger.info("Fill light mode: %s", "auto" if enabled else "manual")
+
+    def _refresh_lighting(self):
+        now = time.monotonic()
+        driver = getattr(self, '_actuator_status', None)
+        if driver is None or not driver[1] or now - driver[0] > 3:
+            self._window.dashboard.update_value("light_pwm", None)
+            return
+        if self._light_auto:
+            if (self._light_image_pct is None or
+                    now - getattr(self, '_last_brightness_update', 0) > 1.5):
+                return
+            if now - self._light_last_auto >= .5:
+                current = self._light_requested_pct
+                if current is None:
+                    current = self._light_actual_pct
+                if current is not None:
+                    self._light_requested_pct = next_light_percent(
+                        self._light_image_pct, current, self.config.light_image_at_zero,
+                        self.config.light_image_at_full)
+                    self._window.lighting.set_percent(self._light_requested_pct)
+                    self._controller._light_level = round(self._light_requested_pct / 10)
+                self._light_last_auto = now
+        wanted = self._light_requested_pct
+        actual = self._light_actual_pct
+        if wanted is None or (actual is not None and abs(wanted - actual) < .1):
+            return
+        # Coalesce slider changes and retry unacknowledged UDP commands.
+        if now - getattr(self, '_last_light_send', -float('inf')) < .2:
+            return
+        self._last_light_send = now
         self._schedule_async(self._udp.send(
-            Message("host", "cmd.light", {"brightness": brightness})))
+            new_message("host", "cmd.light", {"brightness": wanted / 100})))
 
     def _on_lock_state_changed(self, state: LockState):
         """Start button: lock/unlock system."""
@@ -807,8 +970,8 @@ class HostApp:
         """Gamepad right stick Y → gimbal pitch. Manual input overrides YOLO."""
         if abs(angle - 90.0) > 0.2:
             self._tilt_manual = True
-            self._gimbal_mode = GimbalMode.MANUAL
-            self._window.set_gimbal_mode("MANUAL")
+            if self._gimbal_mode == GimbalMode.AUTO:
+                self._deactivate_tracking()
             self._window.gimbal_deflection.set_tilt(angle)
             self._send_servo(1, angle)
         else:
@@ -818,8 +981,8 @@ class HostApp:
         """Gamepad right stick X → gimbal yaw. Manual input overrides YOLO."""
         if abs(angle - 90.0) > 0.2:
             self._pan_manual = True
-            self._gimbal_mode = GimbalMode.MANUAL
-            self._window.set_gimbal_mode("MANUAL")
+            if self._gimbal_mode == GimbalMode.AUTO:
+                self._deactivate_tracking()
             self._window.gimbal_deflection.set_pan(angle)
             self._send_servo(0, angle)
         else:
@@ -833,24 +996,29 @@ class HostApp:
         self._on_roll_recenter()
 
     def _on_tracking_toggle(self):
-        """RB: toggle AUTO ↔ MANUAL gimbal control mode."""
-        from deepsight_shared.protocol import new_message
+        """RB: toggle detector and AUTO/MANUAL control together."""
         if self._gimbal_mode == GimbalMode.AUTO:
-            self._gimbal_mode = GimbalMode.MANUAL
-            self._pan_manual = False
-            self._tilt_manual = False
-            self._window.set_gimbal_mode("MANUAL")
-            logger.info("Gimbal mode: MANUAL (gamepad)")
-            self._schedule_async(self._udp.send(
-                new_message("host", "cmd.fin.manual")))
-        else:
-            self._gimbal_mode = GimbalMode.AUTO
-            self._pan_manual = False
-            self._tilt_manual = False
-            self._window.set_gimbal_mode("AUTO")
-            logger.info("Gimbal mode: AUTO (YOLO)")
-            self._schedule_async(self._udp.send(
-                new_message("host", "cmd.fin.auto")))
+            self._deactivate_tracking()
+            self._pan_manual = self._tilt_manual = False
+            self._schedule_async(self._udp.send(new_message("host", "cmd.fin.manual")))
+            return
+        if self.config.tracking_mode == "off":
+            self.config.tracking_mode = "fast"
+            self._window.tracking_view.set_mode("fast")
+        try:
+            tracker = self._load_tracker()
+        except Exception:
+            logger.exception("Could not enable tracking")
+            self._window.set_status_message(tr("tracking.load_failed"))
+            return
+        self._tracker = tracker
+        self._framer.reset()
+        self._gimbal_mode = GimbalMode.AUTO
+        self._pan_manual = self._tilt_manual = False
+        self._window.set_gimbal_mode("AUTO")
+        self._update_tracking_status()
+        logger.info("Tracking enabled: %s", self.config.tracking_mode)
+        self._schedule_async(self._udp.send(new_message("host", "cmd.fin.auto")))
 
     def _on_record_toggle(self):
         """B: toggle recording on/off."""
@@ -860,11 +1028,11 @@ class HostApp:
         try:
             status = await self._gopro.get_status()
             if status.recording:
-                ok = await self._gopro.stop_recording()
-                logger.info("Recording stop: %s", "OK" if ok else "FAIL")
-                self._window.depth_chart.set_recording(False)
-                await asyncio.sleep(1.0)
-                await self._gopro.start_viewfinder(port=8554)
+                ok = await self._gopro.stop_recording_and_wait()
+                logger.info("Recording stop/finalize: %s", "OK" if ok else "FAIL")
+                if ok:
+                    self._window.depth_chart.set_recording(False)
+                    await self._gopro.start_viewfinder(port=8554)
             else:
                 await self._gopro.enable_wired_usb(True)
                 ok = await self._gopro.start_recording()
@@ -891,7 +1059,26 @@ class HostApp:
     def _on_preset_cycle(self, direction: int):
         """A: cycle camera preset (+1 forward, -1 backward)."""
         logger.info("Preset cycle: %+d", direction)
-        # TODO: cycle through presets via CameraPresetService
+        self._schedule_async(self._cycle_video_preset(direction))
+
+    async def _cycle_video_preset(self, direction: int):
+        data = await self._gopro.get_preset_status()
+        if not data:
+            return
+        presets, active = GoProClient.normalize_presets(data)
+        video_modes = {12, 15, 27, 32, 36, "FLAT_MODE_VIDEO",
+                       "FLAT_MODE_SLOMO", "FLAT_MODE_VIDEO_BURST_SLOMO",
+                       "FLAT_MODE_VIDEO_LOW_LIGHT"}
+        video_presets = [preset for preset in presets if preset.get("mode") in video_modes]
+        if not video_presets:
+            return
+        active_index = next(
+            (index for index, preset in enumerate(video_presets)
+             if preset.get("id") == active),
+            -1 if direction > 0 else 0,
+        )
+        target = video_presets[(active_index + direction) % len(video_presets)]
+        self._on_load_preset(int(target["id"]))
 
     def _on_winch_sens_changed(self, level: int):
         """D-pad up/down: winch sensitivity level changed."""
@@ -907,6 +1094,27 @@ class HostApp:
         logger.info("Plate sensitivity: level %d, curve %.2f", level, curve)
         self._window.dashboard.update_value("plate_sens", str(level))
         self._controller._max_servo_speed = 60.0 * curve
+
+    def _sync_horizon_roll_lock(self, presets: list, active_id: int):
+        active = next((preset for preset in presets if preset["id"] == active_id), None)
+        if active is None:
+            return
+        lens = next(
+            (setting.get("value") for setting in active.get("setting_array", [])
+             if str(setting.get("id")) == "121"),
+            None,
+        )
+        if lens is None:
+            return
+        # Video Lens option 10 is Linear + Horizon Lock in settings_decode.
+        locked = str(lens) == "10"
+        if locked != self._roll_horizon_locked:
+            self._roll_horizon_locked = locked
+            logger.info("Preset horizon roll lock: %s", locked)
+            if locked:
+                self._controller._roll_angle = 90.0
+                self._last_sent_angles.pop(2, None)
+                self._on_roll_recenter()
 
     def _on_get_presets(self):
         """Request preset list from camera via HTTP."""
@@ -933,7 +1141,8 @@ class HostApp:
             return
         data = await self._gopro.get_preset_status()
         if data:
-            presets, _ = GoProClient.normalize_presets(data)
+            presets, active = GoProClient.normalize_presets(data)
+            self._window.gopro_presets_loaded.emit(presets, active)
             for p in presets:
                 if p.get("id") == preset_id:
                     from deepsight_host.gopro.settings_decode import preset_aspect_ratio
@@ -957,6 +1166,8 @@ class HostApp:
 
     def _send_servo(self, servo_id: int, angle: float):
         """Send servo angle command with deadband + duplicate suppression."""
+        if servo_id == 2 and self._roll_horizon_locked and angle != 90.0:
+            return
         now = time.monotonic()
         last = self._last_sent_angles.get(servo_id)
 
@@ -988,21 +1199,26 @@ class HostApp:
         self._window.set_status_message("EMERGENCY STOP — all motors halted")
 
     def _switch_tracking_mode(self, mode: str):
+        if mode == self.config.tracking_mode:
+            return
         logger.info("Switching tracking mode: %s", mode)
-        if mode == "off":
-            self._tracker = None
-        else:
-            self._tracker = get_tracker(mode,
-                                         confidence_threshold=self.config.confidence_threshold,
-                                         iou_threshold=self.config.iou_threshold,
-                                         model_path=self.config.model_path)
         self.config.tracking_mode = mode
-        self._update_tracking_status()
+        if mode == "off":
+            self._deactivate_tracking()
+            return
+        if self._gimbal_mode == GimbalMode.AUTO:
+            # Drop the previous detector before constructing a replacement.
+            self._deactivate_tracking()
+            self._on_tracking_toggle()
+        else:
+            # Changing preferences while idle must not load a model.
+            self._update_tracking_status()
 
     def _reset_tracker(self):
-        self._tracker.reset()
+        if self._tracker is not None:
+            self._tracker.reset()
         self._framer.reset()
-        self._window.tracking_view.set_status("Tracker reset")
+        self._update_tracking_status()
 
     def _on_node_state_change(self, node_id: str, old, new):
         logger.warning("Node %s: %s -> %s", node_id, old, new)
@@ -1058,5 +1274,10 @@ def _cv2():
 
 
 if __name__ == "__main__":
+    # Keep one owner of telemetry sockets and the gamepad bridge.
+    instance_lock = QLockFile(QDir.tempPath() + "/deepsight-host.lock")
+    if not instance_lock.tryLock(0):
+        print("DeepSight Host is already running. Please use the existing window.", file=sys.stderr)
+        sys.exit(1)
     app = HostApp()
     sys.exit(app.run())

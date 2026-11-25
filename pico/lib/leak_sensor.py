@@ -85,9 +85,48 @@ class ADCLeakSensor(LeakSensorDriver):
             return self._states[channel]
 
 
+class DigitalLeakSensor(LeakSensorDriver):
+    """Alarm-module input, powered at 3.3V; high means wet by default."""
+
+    def __init__(self):
+        super().__init__("leak_digital")
+        self._pins = []
+        self._channels = config.LEAK_CHANNELS
+        self._active_high = getattr(config, "LEAK_ACTIVE_HIGH", True)
+        self.last_error = None
+
+    def init(self) -> bool:
+        self._initialized = False
+        self._pins = []
+        self.last_error = None
+        try:
+            from machine import Pin
+            numbers = config.LEAK_DIGITAL_PINS[:self._channels]
+            if len(numbers) != self._channels or not numbers:
+                raise ValueError("Leak input count does not match configured pins")
+            pull = Pin.PULL_DOWN if self._active_high else Pin.PULL_UP
+            self._pins = [Pin(number, Pin.IN, pull) for number in numbers]
+        except Exception as exc:
+            self.last_error = str(exc)
+            return False
+        return super().init()
+
+    def read_all(self) -> list:
+        if not self.initialized:
+            raise OSError(self.last_error or "Leak sensor not initialized")
+        return [bool(pin.value()) == self._active_high for pin in self._pins]
+
+    def is_wet(self, channel: int) -> bool:
+        if not 0 <= channel < self._channels:
+            return False
+        return self.read_all()[channel]
+
+
 # ── Factory ──────────────────────────────────────────────
 
 def create_leak_sensor() -> LeakSensorDriver:
     if config.MOCK_ENABLED:
         return MockLeakSensor()
+    if getattr(config, "LEAK_INPUT_MODE", "adc") == "digital":
+        return DigitalLeakSensor()
     return ADCLeakSensor()

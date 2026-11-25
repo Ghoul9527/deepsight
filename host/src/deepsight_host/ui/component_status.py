@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QFrame,
 )
@@ -70,6 +71,8 @@ class ComponentStatusIndicator(QFrame):
                 SafetyState.EMERGENCY: tr("component.state_lost"),
             }
             text = state_map.get(self._state, "???")
+            if self._component_key == "pca9685" and self._state == SafetyState.EMERGENCY:
+                text = tr("component.state_fault")
             self._state_label.setText(text)
 
     def update_state(self, state: SafetyState | None, heartbeat_ago: float = 0.0,
@@ -92,6 +95,9 @@ class ComponentStatusIndicator(QFrame):
             SafetyState.EMERGENCY: ("status_red", tr("component.state_lost")),
         }
         obj_name, text = state_map.get(state, ("status_red", "???"))
+        if self._component_key == "pca9685" and state == SafetyState.EMERGENCY:
+            text = tr("component.state_fault")
+        self.setToolTip(info)
         self._state_label.setText(text)
         self._state_label.setObjectName(obj_name)
         self._state_label.style().unpolish(self._state_label)
@@ -118,12 +124,12 @@ class ComponentStatusWidget(QWidget):
         self._title_label.setStyleSheet("font-weight: bold; font-size: 10px; color: #8888cc;")
         layout.addWidget(self._title_label)
 
-        row = QHBoxLayout()
+        row = QGridLayout()
         row.setSpacing(4)
-        for component_key in ["pi", "gopro", "pico", "stm32", "gamepad"]:
+        for index, component_key in enumerate(["pi", "gopro", "pico", "pca9685", "stm32", "gamepad"]):
             indicator = ComponentStatusIndicator(component_key)
             self._indicators[component_key] = indicator
-            row.addWidget(indicator)
+            row.addWidget(indicator, index // 3, index % 3)
         layout.addLayout(row)
 
         I18n.instance().language_changed.connect(self._retranslate)

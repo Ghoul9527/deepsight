@@ -90,19 +90,11 @@ if d:
 done
 
 if [ -z "$FOUND_IP" ]; then
-    # Broader scan: try known GoPro USB subnets
-    info "Gateway check failed, scanning known GoPro subnets..."
-    for subnet in "172.20.{0..31}.1" "172.21.{0..31}.1" "172.22.{0..31}.1" \
-                  "172.23.{0..31}.1" "172.24.{0..31}.1" "172.25.{0..31}.1" \
-                  "172.26.{0..31}.1" "172.27.{0..31}.1" "172.28.{0..31}.1" \
-                  "172.29.{0..31}.1" "172.30.{0..31}.1" "172.31.{0..31}.1" \
-                  "10.5.5.9"; do
-        if timeout 1 bash -c "echo >/dev/tcp/$subnet/8080" 2>/dev/null; then
-            pass "GoPro HTTP API reachable at $subnet:8080"
-            FOUND_IP="$subnet"
-            break
-        fi
-    done
+    info "Subnet check failed, trying the official _gopro-web mDNS service..."
+    if command -v avahi-browse >/dev/null 2>&1; then
+        FOUND_IP=$(avahi-browse -rtp _gopro-web._tcp 2>/dev/null \
+            | awk -F';' '$1 == "=" && $8 ~ /^172\./ {print $8; exit}')
+    fi
 fi
 
 if [ -z "$FOUND_IP" ]; then
@@ -122,13 +114,13 @@ echo ""
 echo "── GoPro HTTP API Tests ──"
 
 check "Camera info..."
-CAM_INFO=$(curl -s --connect-timeout 3 "http://$FOUND_IP:8080/gp/gpControl/info" 2>&1 || true)
+CAM_INFO=$(curl -s --connect-timeout 3 "http://$FOUND_IP:8080/gopro/camera/info" 2>&1 || true)
 if [ -n "$CAM_INFO" ]; then
     pass "Camera info endpoint responding"
     echo "$CAM_INFO" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
-info=d.get('info',{})
+info=d
 print(f\"    Model:      {info.get('model_name','?')} ({info.get('model_number','?')})\")
 print(f\"    Firmware:   {info.get('firmware_version','?')}\")
 print(f\"    Serial:     {info.get('serial_number','?')}\")
@@ -137,39 +129,68 @@ else
     fail "Camera info endpoint not responding"
 fi
 
+check "MISSION capabilities and Open GoPro version..."
+CAPABILITIES=$(curl -s --connect-timeout 3 \
+    "http://$FOUND_IP:8080/gopro/camera/capabilities" 2>&1 || true)
+OGP_VERSION=$(curl -s --connect-timeout 3 \
+    "http://$FOUND_IP:8080/gopro/version" 2>&1 || true)
+if [ -n "$CAPABILITIES" ] && [ -n "$OGP_VERSION" ]; then
+    pass "MISSION capability endpoints responding"
+    echo "    Capabilities: $CAPABILITIES"
+    echo "    Open GoPro:   $OGP_VERSION"
+else
+    fail "MISSION capability endpoints not responding (requires firmware >=1.10.00)"
+fi
+
 echo ""
 check "Camera status..."
-STATUS=$(curl -s --connect-timeout 3 "http://$FOUND_IP:8080/gp/gpControl/status" 2>&1 || true)
+STATUS=$(curl -s --connect-timeout 3 "http://$FOUND_IP:8080/gopro/camera/state" 2>&1 || true)
 if [ -n "$STATUS" ]; then
     pass "Status endpoint responding"
     echo "$STATUS" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 s=d.get('status',{})
-# Battery
-b=s.get('33',0); bp=s.get('34',0)
-print(f'    Battery:    {b}% (percent2={bp}%)')
-# Recording
-r=s.get('8',0)
+# Battery and recording status IDs from Open GoPro
+b=s.get('70',0)
+print(f'    Battery:    {b}%')
+r=s.get('10',0)
 print(f'    Recording:  {\"YES\" if r==1 else \"no\"} (state={r})')
-# Mode
-m=s.get('43',-1)
-modes={0:'Video',1:'Photo',2:'MultiShot',3:'Timelapse'}
-print(f'    Mode:       {modes.get(m,str(m))} (id={m})')
+m=s.get('96',-1); p=s.get('97',-1)
+print(f'    Preset:     group={m}, id={p}')
 # Storage
 sd=s.get('54',0)
-print(f'    SD remain:  {sd} units')
-# Temp
-t=s.get('37',0)
-print(f'    Battery T:  {t}°C')
+print(f'    SD remain:  {sd} KB ({sd/1e6:.1f} GB)')
 " 2>/dev/null || echo "    Raw: $STATUS"
 else
     fail "Status endpoint not responding"
 fi
 
 echo ""
+echo "── MISSION Video Setting Capabilities ──"
+for SID in 239 2 3 108 121 135 150 173 180 182 183 184 156 167 256 257 134 59 83 88 219 91 216; do
+    RESPONSE=$(curl -s --connect-timeout 3 \
+        "http://$FOUND_IP:8080/gopro/camera/setting?setting=$SID&option=65535" \
+        2>&1 || true)
+    SUMMARY=$(printf '%s' "$RESPONSE" | python3 -c "
+import json,sys
+try:
+    data=json.load(sys.stdin)
+except Exception:
+    print('no response')
+    raise SystemExit
+options=data.get('supported_options')
+if isinstance(options,list):
+    print(', '.join(f\"{item.get('id')}={item.get('display_name', item.get('id'))}\" for item in options))
+else:
+    print(f\"unsupported/error={data.get('error','?')}\")
+" 2>/dev/null || echo "parse failed")
+    check "Setting $SID: $SUMMARY"
+done
+
+echo ""
 check "Media list (first 3 files)..."
-MEDIA=$(curl -s --connect-timeout 5 "http://$FOUND_IP:8080/gp/gpMediaList" 2>&1 || true)
+MEDIA=$(curl -s --connect-timeout 5 "http://$FOUND_IP:8080/gopro/media/list" 2>&1 || true)
 if [ -n "$MEDIA" ]; then
     echo "$MEDIA" | python3 -c "
 import json,sys

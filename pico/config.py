@@ -41,31 +41,38 @@ SERVO_PULSE_MAX_US = 2500
 
 # -- IMU (MPU6050, I2C) -----------------------------------
 IMU_I2C_ADDR = 0x68
-IMU_I2C_SCL_PIN = 1
-IMU_I2C_SDA_PIN = 0
-IMU_I2C_FREQ = 400000
+IMU_I2C_BUS = 0
+IMU_I2C_SCL_PIN = 21  # physical pin 27
+IMU_I2C_SDA_PIN = 20  # physical pin 26
+IMU_I2C_FREQ = 100000
 IMU_GYRO_SCALE = 250   # deg/s
 IMU_ACCEL_SCALE = 2    # g
 
 # -- Pressure / Depth (MS5837-30BA, I2C) ------------------
 PRESSURE_I2C_ADDR = 0x76
-PRESSURE_I2C_SCL_PIN = 1
-PRESSURE_I2C_SDA_PIN = 0
-PRESSURE_I2C_FREQ = 400000
+PRESSURE_I2C_BUS = 1
+PRESSURE_I2C_SCL_PIN = 19  # physical pin 25
+PRESSURE_I2C_SDA_PIN = 18  # physical pin 24
+PRESSURE_I2C_FREQ = 10000  # Bring-up speed with weak Pico internal pull-ups.
+PRESSURE_I2C_INTERNAL_PULLUP = True
 
 # -- Environment (BME280, I2C) ----------------------------
+BME280_ENABLED = False  # Not fitted; must not reconfigure I2C0 on GP0/GP1.
 BME280_I2C_ADDR = 0x77
 BME280_I2C_SCL_PIN = 1
 BME280_I2C_SDA_PIN = 0
-BME280_I2C_FREQ = 400000
+BME280_I2C_FREQ = 100000
 
 # -- Lighting (PWM) ---------------------------------------
 LIGHTING_CHANNELS = 4
 LIGHTING_PWM_FREQ = 1000
 LIGHTING_PWM_PINS = [6, 7, 8, 9]
 
-# -- Leak sensor (ADC) ------------------------------------
-LEAK_CHANNELS = 4
+# -- Leak sensor (digital, high = wet) ---------------------
+LEAK_CHANNELS = 1
+LEAK_INPUT_MODE = "digital"
+LEAK_DIGITAL_PINS = [2]
+LEAK_ACTIVE_HIGH = True
 LEAK_ADC_PINS = [26, 27, 28, 29]
 LEAK_WET_THRESHOLD = 1.5  # volts, below = wet
 
@@ -103,6 +110,13 @@ def _load_yaml_overrides():
     g["SERVO_I2C_ADDR"] = _yaml_get(cfg, "servo", "i2c_address", g["SERVO_I2C_ADDR"])
     g["IMU_I2C_ADDR"] = _yaml_get(cfg, "imu", "i2c_address", g["IMU_I2C_ADDR"])
     g["PRESSURE_I2C_ADDR"] = _yaml_get(cfg, "pressure", "i2c_address", g["PRESSURE_I2C_ADDR"])
+    for section, prefix in (("imu", "IMU"), ("pressure", "PRESSURE")):
+        for key, suffix in (("i2c_bus", "I2C_BUS"), ("sda_pin", "I2C_SDA_PIN"),
+                            ("scl_pin", "I2C_SCL_PIN"), ("i2c_freq", "I2C_FREQ")):
+            name = prefix + "_" + suffix
+            g[name] = _yaml_get(cfg, section, key, g[name])
+    g["PRESSURE_I2C_INTERNAL_PULLUP"] = _yaml_get(cfg, "pressure", "internal_pullup", g["PRESSURE_I2C_INTERNAL_PULLUP"])
+    g["BME280_ENABLED"] = _yaml_get(cfg, "bme280", "enabled", g["BME280_ENABLED"])
     g["BME280_I2C_ADDR"] = _yaml_get(cfg, "bme280", "i2c_address", g["BME280_I2C_ADDR"])
     g["LIGHTING_PWM_FREQ"] = _yaml_get(cfg, "lighting", "pwm_freq_hz", g["LIGHTING_PWM_FREQ"])
     g["LEAK_CHANNELS"] = _yaml_get(cfg, "leak_sensor", "channels", g["LEAK_CHANNELS"])

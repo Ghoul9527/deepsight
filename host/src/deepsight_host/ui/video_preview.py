@@ -68,6 +68,10 @@ class VideoPreviewWidget(QWidget):
         self._overlay_label.setAlignment(Qt.AlignCenter)
         self._overlay_label.setMinimumWidth(160)
 
+        self._preset_label = QLabel(self)
+        self._preset_label.setStyleSheet(self._overlay_label.styleSheet())
+        self._preset_label.hide()
+
         self._rec_label = QLabel(self)
         self._rec_label.setStyleSheet(
             "background: rgba(0, 0, 0, 180); color: #ff3344; font-size: 15px; "
@@ -190,6 +194,8 @@ class VideoPreviewWidget(QWidget):
         oh = overlay.height()
         overlay.move(label.x() + 8, label.y() + label.height() - oh - 8)
 
+        self._preset_label.move(label.x() + 8, label.y() + 8)
+
         right_x = label.x() + label.width() - 8
         top_y = label.y() + 8
 
@@ -219,6 +225,18 @@ class VideoPreviewWidget(QWidget):
         else:
             self._rec_label.setText(f"● REC {m:02d}:{s:02d}")
         self._rec_label.adjustSize()
+        self._position_overlay()
+
+    def set_preset(self, preset: dict | None):
+        if not preset:
+            self._preset_label.clear()
+            self._preset_label.hide()
+            return
+        title = preset.get("title") or f"Preset {preset.get('id', '--')}"
+        summary = preset.get("summary", "")
+        self._preset_label.setText(title + (f"\n{summary}" if summary else ""))
+        self._preset_label.adjustSize()
+        self._preset_label.show()
         self._position_overlay()
 
     def set_recording(self, recording: bool):

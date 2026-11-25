@@ -1,4 +1,4 @@
-"""Generated from OpenAPI spec — maps GoPro numeric setting values to labels."""
+"""MISSION 1 PRO setting labels from the Open GoPro HTTP specification."""
 
 # Key: setting ID → (title, {value: label})
 SETTINGS: dict[int, tuple[str, dict[int, str]]] = {
@@ -7,19 +7,21 @@ SETTINGS: dict[int, tuple[str, dict[int, str]]] = {
         12: "720", 18: "4K 4:3", 21: "5.6K", 24: "5K", 25: "5K 4:3",
         26: "5.3K 8:7", 27: "5.3K 4:3", 28: "4K 8:7", 31: "8K",
         35: "5.3K 21:9", 36: "4K 21:9", 37: "4K 1:1", 38: "900",
-        39: "4K SPH", 100: "5.3K", 107: "5.3K 8:7", 108: "4K 8:7",
+        39: "4K SPH", 40: "8K 4:3", 44: "1440 4:3", 100: "5.3K",
+        107: "5.3K 8:7", 108: "4K 8:7",
         109: "4K 9:16", 110: "1080 9:16", 111: "2.7K 4:3",
         112: "4K 4:3", 113: "5.3K 4:3",
     }),
     3: ("FPS", {
-        0: "240", 1: "120", 2: "100", 3: "60", 4: "50", 5: "48",
-        6: "30", 7: "25", 8: "24", 9: "200", 10: "400",
-        11: "30/25", 12: "60/50",
+        0: "240", 1: "120", 2: "100", 3: "90", 5: "60", 6: "50",
+        8: "30", 9: "25", 10: "24", 13: "200", 15: "400",
+        16: "360", 17: "300", 18: "480", 19: "960", 20: "800",
     }),
     5: ("Timelapse Rate", {
         0: "0.5s", 1: "1s", 2: "2s", 3: "5s", 4: "10s",
-        5: "30s", 6: "60s", 7: "2min", 8: "5min",
-        10: "30min", 11: "60min",
+        5: "30s", 6: "60s", 7: "2min", 8: "5min", 9: "30min",
+        10: "60min", 11: "3s", 12: "4s", 13: "15s", 14: "20s",
+        15: "Auto",
     }),
     32: ("Nightlapse Rate", {
         4: "4s", 5: "5s", 10: "10s", 11: "15s", 12: "20s",
@@ -35,19 +37,23 @@ SETTINGS: dict[int, tuple[str, dict[int, str]]] = {
         10: "Linear", 19: "Narrow", 31: "Wide 27MP", 32: "Linear 27MP",
     }),
     121: ("Video Lens", {
-        0: "Wide", 2: "Narrow", 3: "Superview", 4: "Wide 4:3",
-        10: "Linear", 14: "Hyperview", 15: "Superview 16:9",
-        16: "Linear 16:9", 17: "Hyperview 16:9",
+        0: "Wide", 2: "Narrow", 3: "Superview",
+        4: "Linear", 7: "Max SuperView", 8: "Linear + Horizon Leveling",
+        9: "HyperView", 10: "Linear + Horizon Lock", 11: "Max HyperView",
+        12: "Ultra SuperView", 13: "Ultra Wide", 14: "Ultra Linear",
+        104: "Ultra HyperView",
     }),
     122: ("Photo Lens", {
         0: "Wide 12MP", 10: "Linear 12MP", 15: "9MP Wide",
-        16: "Linear 9MP", 17: "Wide 27MP", 18: "Linear 27MP",
-        19: "Wide 5MP", 20: "Linear 5MP", 30: "Wide 27MP 16:9",
-        31: "Linear 27MP 16:9", 32: "Wide 24.7MP",
+        19: "Narrow", 27: "Wide 23MP", 28: "Linear 23MP",
+        31: "Wide 27MP", 32: "Linear 27MP", 37: "9MP Linear",
+        38: "13MP Linear", 39: "13MP Wide", 40: "13MP Ultra Wide",
+        41: "Ultra Wide 12MP", 44: "13MP Ultra Linear",
+        100: "Max SuperView", 101: "Wide", 102: "Linear",
     }),
     123: ("Timelapse Lens", {
-        0: "Wide", 2: "Narrow", 3: "Superview", 19: "Narrow",
-        31: "Wide 27MP", 32: "Linear 27MP",
+        19: "Narrow", 31: "Wide 27MP", 32: "Linear 27MP",
+        100: "Max SuperView", 101: "Wide", 102: "Linear",
     }),
     125: ("Photo Output", {0: "Standard", 1: "Raw", 2: "HDR"}),
     128: ("Media Format", {
@@ -58,7 +64,7 @@ SETTINGS: dict[int, tuple[str, dict[int, str]]] = {
     156: ("Duration", {
         1: "15s", 2: "30s", 3: "1min", 4: "5min", 5: "15min",
         6: "30min", 7: "1hr", 8: "2hr", 9: "3hr", 10: "MAX",
-        0: "Off",
+        0: "Off", 11: "10s", 100: "No Limit",
     }),
     162: ("Max Lens", {0: "Off", 1: "On"}),
     173: ("Performance", {
@@ -73,7 +79,15 @@ SETTINGS: dict[int, tuple[str, dict[int, str]]] = {
     }),
     182: ("Bit Rate", {0: "Standard", 1: "High", 2: "Max"}),
     183: ("Bit Depth", {0: "8-Bit", 2: "10-Bit"}),
-    184: ("Profile", {0: "Standard", 1: "HDR", 2: "Log"}),
+    239: ("Sub Mode", {
+        12: "Standard", 13: "Stationary", 15: "Looping", 16: "Photo",
+        19: "Burst", 24: "Motion", 27: "Slo-Mo", 29: "Star Trails",
+        30: "Light Painting", 31: "Vehicle Lights", 32: "Burst Slo-Mo",
+        36: "Low Light", 100: "Interval",
+    }),
+    256: ("Image Tuning", {0: "Dive", 1: "Face", 2: "Sport", 3: "Balanced"}),
+    257: ("Subject Tracking", {0: "Off", 1: "On"}),
+    273: ("Output", {0: "Video", 1: "Video + JPG", 2: "Video + JPG + RAW"}),
     186: ("Easy Mode", {
         0: "Highest Quality", 1: "Standard", 2: "Basic",
         3: "Ultra Slo-Mo", 4: "Basic Slo-Mo",
@@ -82,7 +96,12 @@ SETTINGS: dict[int, tuple[str, dict[int, str]]] = {
         0: "TimeWarp", 1: "Star Trails", 2: "Light Painting",
         3: "Light Trail", 4: "Time Lapse", 5: "Night Lapse",
     }),
-    189: ("Max Lens Mod", {0: "None", 1: "Max Lens 1.0", 2: "Max Lens 2.0"}),
+    189: ("Lens Mod", {
+        0: "None", 1: "Max Lens 1.0", 2: "Max Lens 2.0",
+        3: "Max Lens 2.5", 4: "Macro", 5: "Anamorphic", 6: "ND 4",
+        7: "ND 8", 8: "ND 16", 9: "ND 32", 10: "Standard Lens",
+        11: "ND 64", 100: "Auto Detect",
+    }),
     192: ("Aspect Ratio", {0: "4:3", 1: "16:9", 3: "8:7"}),
     193: ("Framing", {
         0: "Widescreen", 1: "Vertical", 2: "Full Frame",
@@ -97,19 +116,14 @@ SETTINGS: dict[int, tuple[str, dict[int, str]]] = {
     }),
 }
 
-# Default values for settings that GoPro omits from settingArray (factory defaults)
-DEFAULTS: dict[int, int] = {
-    184: 0,   # Profile → Standard
-    183: 0,   # Bit Depth → 8-Bit
-    182: 0,   # Bit Rate → Standard
-    173: 0,   # Performance → Max Quality
-    135: 0,   # Hypersmooth → Off
-}
+# Do not infer omitted values: MISSION capabilities and preset contents are
+# context-sensitive and remain the source of truth.
+DEFAULTS: dict[int, int] = {}
 
 # Priority order for preset summary display
 SUMMARY_ORDER = [
     # Color / Quality
-    184,  # Profile (Standard/HDR/Log) — 色彩模式
+    239, 256,  # General sub-mode and MISSION image tuning
     # Resolution
     2, 234, 3,  # Resolution, Frame Rate
     # Lens
@@ -121,11 +135,11 @@ SUMMARY_ORDER = [
     # Bit Rate
     182,
     # Other
-    135, 173, 162, 189,
+    135, 257, 189,
     # Photo
-    125, 227, 122,
+    125, 273, 122,
     # Timelapse
-    5, 32, 187, 128,
+    5,
 ]
 
 
@@ -152,12 +166,12 @@ _ASPECT_RATIOS: dict[int, tuple[int, int]] = {
 def preset_aspect_ratio(setting_array: list[dict]) -> tuple[int, int] | None:
     """Extract target aspect ratio (w, h) from a preset's settingArray.
 
-    Checks settings 108 (Video Aspect Ratio) and 232 (Video Framing).
+    Checks settings 108 (Video Aspect Ratio) and 192 (Multi Shot Aspect Ratio).
     Returns None if no aspect ratio setting is found.
     """
     for s in setting_array:
         sid = s.get("id", 0)
-        if sid in (108, 232):
+        if sid in (108, 192):
             val = s.get("value", 0)
             if val in _ASPECT_RATIOS:
                 return _ASPECT_RATIOS[val]

@@ -25,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("gopro_test")
 
-PI_ADDRESS = "192.168.20.51"
+PI_ADDRESS = "192.168.3.161"
 PI_UDP_PORT = 5100
 
 

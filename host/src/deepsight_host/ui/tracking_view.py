@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QComboBox,
     QPushButton,
+    QSizePolicy,
 )
 
 from deepsight_shared.constants import TrackingMode
@@ -39,9 +40,16 @@ class TrackingViewWidget(QWidget):
         mode_group = QGroupBox(tr("tracking.mode"))
         mode_layout = QVBoxLayout(mode_group)
         mode_layout.setSpacing(4)
+        mode_layout.setContentsMargins(12, 24, 12, 12)
+        mode_group.setMinimumHeight(90)
+        mode_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
         selector_layout = QHBoxLayout()
         self._mode_combo = QComboBox()
+        self._mode_combo.setMinimumHeight(32)
+        self._mode_combo.setMinimumWidth(120)
+        self._mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self._mode_combo.addItem(tr("tracking.fast"), TrackingMode.FAST.value)
         self._mode_combo.addItem(tr("tracking.precise"), TrackingMode.PRECISE.value)
         selector_layout.addWidget(self._mode_combo)
@@ -71,7 +79,9 @@ class TrackingViewWidget(QWidget):
         root.addWidget(self._reset_btn)
 
         root.addStretch()
+        self.setMinimumHeight(root.minimumSize().height())
 
+        self.set_tracking_active(False)
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
 
     def _retranslate(self, _lang: str = ""):
@@ -109,3 +119,17 @@ class TrackingViewWidget(QWidget):
     @property
     def reset_button(self) -> QPushButton:
         return self._reset_btn
+
+    def set_tracking_active(self, active: bool):
+        self._mode_combo.setEnabled(active)
+        self._reset_btn.setEnabled(active)
+
+    def set_mode(self, mode: str):
+        self._mode_combo.blockSignals(True)
+        index = self._mode_combo.findData(mode)
+        if index >= 0:
+            self._mode_combo.setCurrentIndex(index)
+        self._mode_combo.blockSignals(False)
+
+    def set_preview_metrics(self, fps: float):
+        self._metrics_label.setText(f"Preview: {fps:.1f} FPS\nYOLO: OFF · 0 ms")

@@ -26,21 +26,38 @@ class MessageRouter:
         self._pico = pico_link
         self._stm32 = stm32_link
         self._running = False
+        self._tasks = []
+        self._telemetry_stall_s = 5.0
+        self._telemetry_retry_s = 1.0
+        self._telemetry_check_s = 1.0
+        self._telemetry_last_progress = 0.0
+        self._telemetry_restarts = 0
+        self._telemetry_recovering = False
+        self._telemetry_health_logged = 0.0
         # Coalesced servo commands: only the latest angle per servo is kept
         self._servo_buf: dict[int, Message] = {}
         self._lighting_buf: Message | None = None
         self._send_interval = 0.02   # 50 Hz flush rate
+        self._servo_config = servo_config or {}
+        self._stabilizer_config = stabilizer_config or {}
+        self._fin_config = fin_config or {}
+        self._actuator_retry_s = 1.0
+        self._actuator_probe_successes = 0
 
         # Local servo controller (Pi drives PCA9685 directly)
         self._servo = None
+        self._actuator_fault = None
         if servo_config and servo_config.get("pca9685"):
             from deepsight_pi.servo_controller import ServoController
-            self._servo = ServoController(servo_config)
-            logger.info("Servo controller: local PCA9685 mode")
+            try:
+                self._servo = ServoController(servo_config)
+                logger.info("Servo controller: local PCA9685 mode")
+            except OSError as error:
+                self._latch_actuator_fault(error)
 
         # Roll stabilizer (IMU → roll servo auto-correction)
         self._stabilizer = None
-        if stabilizer_config and stabilizer_config.get("roll", {}).get("enabled"):
+        if self._servo is not None and stabilizer_config and stabilizer_config.get("roll", {}).get("enabled"):
             from deepsight_pi.roll_stabilizer import RollStabilizer
             self._stabilizer = RollStabilizer(self._servo, stabilizer_config["roll"])
             logger.info("Roll stabilizer: enabled")
@@ -52,13 +69,105 @@ class MessageRouter:
             self._fin = FinController(self._servo, fin_config)
             logger.info("Fin coupling: enabled")
 
+    def _latch_actuator_fault(self, error):
+        if self._actuator_fault is None:
+            self._actuator_fault = str(error)
+            logger.error("PCA9685 communication failed: %s; actuator writes paused; auto-recovery checks every %.1fs; telemetry continues", error, self._actuator_retry_s)
+        self._actuator_probe_successes = 0
+        self._servo_buf.clear()
+        self._lighting_buf = None
+
+    def _actuator_call(self, function, *args):
+        if self._actuator_fault is not None:
+            return
+        try:
+            return function(*args)
+        except OSError as error:
+            self._latch_actuator_fault(error)
+
     async def start(self):
         self._running = True
-        asyncio.create_task(self._route_host_to_downstream())
-        asyncio.create_task(self._flush_downstream())
-        asyncio.create_task(self._generate_telemetry())
-        asyncio.create_task(self._poll_pico())
+        self._tasks = [asyncio.create_task(job) for job in (
+            self._route_host_to_downstream(), self._flush_downstream(),
+            self._supervise_telemetry(), self._poll_pico(), self._recover_actuator())]
         logger.info("MessageRouter started")
+
+    def _probe_actuator(self):
+        from smbus2 import SMBus
+        pca = self._servo_config["pca9685"]
+        with SMBus(pca.get("i2c_bus", 1)) as bus:
+            bus.read_byte_data(pca.get("i2c_address", 0x40), 0x00)
+
+    def _restore_actuator(self):
+        from deepsight_pi.servo_controller import ServoController
+        if self._servo is None:
+            self._servo = ServoController(self._servo_config)
+        else:
+            self._servo.recover()
+        # Rebuild derived controllers so old yaw/speed/IMU history is discarded.
+        self._stabilizer = None
+        self._fin = None
+        if self._stabilizer_config.get("roll", {}).get("enabled"):
+            from deepsight_pi.roll_stabilizer import RollStabilizer
+            self._stabilizer = RollStabilizer(self._servo, self._stabilizer_config["roll"])
+        if self._fin_config.get("enabled"):
+            from deepsight_pi.fin_controller import FinController
+            self._fin = FinController(self._servo, self._fin_config)
+
+    async def _recover_actuator(self):
+        last_warning = -float('inf')
+        while self._running:
+            await asyncio.sleep(self._actuator_retry_s)
+            if self._actuator_fault is None or not self._servo_config.get("pca9685"):
+                continue
+            try:
+                self._probe_actuator()
+                self._actuator_probe_successes += 1
+                if self._actuator_probe_successes < 2:
+                    continue
+                self._restore_actuator()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._actuator_probe_successes = 0
+                if time.monotonic() - last_warning >= 30:
+                    logger.warning("PCA9685 recovery pending: %s", error)
+                    last_warning = time.monotonic()
+                continue
+            self._servo_buf.clear()
+            self._lighting_buf = None
+            self._actuator_fault = None
+            self._actuator_probe_successes = 0
+            logger.info("PCA9685 recovered: fault cleared; servos initialized to default, light off; old commands discarded")
+
+    async def _supervise_telemetry(self):
+        """Restart telemetry on exceptions, unexpected exit, or lack of progress."""
+        while self._running:
+            self._telemetry_last_progress = time.monotonic()
+            worker = asyncio.create_task(self._generate_telemetry(), name="pi-telemetry")
+            try:
+                while self._running:
+                    done, _ = await asyncio.wait({worker}, timeout=self._telemetry_check_s)
+                    if done:
+                        worker.result()  # retain the original exception traceback
+                        if not self._running:
+                            return
+                        raise RuntimeError("Telemetry task exited unexpectedly")
+                    if time.monotonic() - self._telemetry_last_progress > self._telemetry_stall_s:
+                        raise TimeoutError("Telemetry made no progress for %.1fs" % self._telemetry_stall_s)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._telemetry_restarts += 1
+                self._telemetry_recovering = True
+                logger.exception("Telemetry failure; restart=%d retry_in=%.1fs pico_backlog=%d",
+                                 self._telemetry_restarts, self._telemetry_retry_s,
+                                 self._pico.recv_queue.qsize())
+            finally:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+            if self._running:
+                await asyncio.sleep(self._telemetry_retry_s)
 
     async def _route_host_to_downstream(self):
         while self._running:
@@ -75,7 +184,7 @@ class MessageRouter:
             await asyncio.sleep(self._send_interval)
 
             if self._servo is not None:
-                self._servo.check_safety()
+                self._actuator_call(self._servo.check_safety)
 
             count = 0
             sent_ids = []
@@ -92,8 +201,8 @@ class MessageRouter:
                 p = msg.payload
                 angle = p.get("angle", 90.0)
                 if self._servo is not None:
-                    self._servo.set_angle(sid, angle)
-                else:
+                    self._actuator_call(self._servo.set_angle, sid, angle)
+                elif self._actuator_fault is None:
                     await self._pico.send(msg)
                 logger.debug("[PI tx seq=%s] servo %s -> %.1f",
                              p.get("seq", "?"), p.get("servo_id", "?"), angle)
@@ -105,16 +214,22 @@ class MessageRouter:
                 self._servo_buf.pop(sid, None)
             # Flush lighting
             if self._lighting_buf is not None:
-                p = self._lighting_buf.payload
+                lighting = self._lighting_buf
+                p = lighting.payload
                 brightness = p.get("brightness", 0.0)
                 if self._servo is not None:
-                    self._servo.set_brightness(0, brightness)
-                else:
-                    await self._pico.send(self._lighting_buf)
+                    self._actuator_call(self._servo.set_brightness, 0, brightness)
+                elif self._actuator_fault is None:
+                    await self._pico.send(lighting)
                 self._lighting_buf = None
 
     async def _handle_message(self, msg: Message):
         logger.debug("Routing: %s → %s", msg.node_id, msg.type)
+
+        if self._actuator_fault is not None and (
+                msg.type.startswith(("cmd.servo", "cmd.lighting", "cmd.fin"))
+                or msg.type in ("cmd.light", "cmd.sim.depth")):
+            return
 
         if msg.type.startswith("cmd.servo"):
             # Coalesce: keep only the latest command per servo
@@ -127,7 +242,7 @@ class MessageRouter:
                 self._stabilizer.notify_manual()
             if sid == 0 and self._fin is not None:
                 self._fin.update_yaw(p.get("angle", 90.0))
-                self._fin.step()
+                self._actuator_call(self._fin.step)
             if sid in (3, 4) and self._fin is not None:
                 self._fin.notify_manual(p.get("angle", 90.0))
         elif msg.type == "cmd.fin.auto":
@@ -141,7 +256,7 @@ class MessageRouter:
                 p = msg.payload
                 self._fin.update_depth(p.get("depth_m", 0.0), sim=True,
                                        speed_ms=p.get("speed_ms", 0.0))
-                self._fin.step()
+                self._actuator_call(self._fin.step)
         elif msg.type.startswith("cmd.lighting") or msg.type == "cmd.light":
             self._lighting_buf = msg
         elif msg.type.startswith("cmd.winch"):
@@ -169,7 +284,9 @@ class MessageRouter:
 
             # ── Drain Pico recv queue ──
             pico_alive = False
-            while not self._pico.recv_queue.empty():
+            # Bound each batch so accumulated sensor traffic cannot starve
+            # Pi heartbeats and health reporting after a connection outage.
+            for _ in range(100):
                 try:
                     msg = self._pico.recv_queue.get_nowait()
                     if msg.type == "t":
@@ -184,7 +301,7 @@ class MessageRouter:
 
             # ── Drain STM32 recv queue ──
             stm32_alive = False
-            while not self._stm32.recv_queue.empty():
+            for _ in range(100):
                 try:
                     msg = self._stm32.recv_queue.get_nowait()
                     await self._host.send(msg)
@@ -205,10 +322,25 @@ class MessageRouter:
                 mem_pct=mem_pct,
                 uptime_s=_read_uptime(),
             )
+            msg.payload["actuator_ok"] = self._actuator_fault is None
+            msg.payload["actuator_error"] = self._actuator_fault
+            msg.payload["light_pwm_pct"] = (
+                self._servo.get_light_pwm_percent(0)
+                if self._servo is not None and self._actuator_fault is None else None)
             await self._host.send(msg)
 
             msg = make_heartbeat("pi")
             await self._host.send(msg)
+            now = time.monotonic()
+            self._telemetry_last_progress = now
+            if self._telemetry_recovering:
+                logger.info("Telemetry recovered; restarts=%d pico_backlog=%d",
+                            self._telemetry_restarts, self._pico.recv_queue.qsize())
+                self._telemetry_recovering = False
+            if now - self._telemetry_health_logged >= 60:
+                logger.info("Telemetry healthy; restarts=%d pico_backlog=%d",
+                            self._telemetry_restarts, self._pico.recv_queue.qsize())
+                self._telemetry_health_logged = now
 
     async def _poll_pico(self):
         """Poll Pico for telemetry at 20 Hz. Pico responds immediately,
@@ -241,7 +373,7 @@ class MessageRouter:
         ))
         if self._stabilizer is not None:
             self._stabilizer.update_imu(roll)
-            self._stabilizer.step()
+            self._actuator_call(self._stabilizer.step)
         depth_m = float(p.get("d", 0))
         await self._host.send(tel_depth(
             node,
@@ -251,7 +383,7 @@ class MessageRouter:
         ))
         if self._fin is not None:
             self._fin.update_depth(depth_m)
-            self._fin.step()
+            self._actuator_call(self._fin.step)
         await self._host.send(tel_env(
             node,
             temp_c=float(p.get("et", 0)),
@@ -278,6 +410,10 @@ class MessageRouter:
 
     async def stop(self):
         self._running = False
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
 
 
 # ── Pi system stat helpers ──

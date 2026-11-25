@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import math
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -11,6 +13,7 @@ DEFAULT_CONFIG_PATH = Path("configs/host_config.yaml")
 class HostConfig:
     def __init__(self, path: Path | None = None):
         path = path or DEFAULT_CONFIG_PATH
+        self.config_path = Path(path).resolve()
         with open(path) as f:
             data = yaml.safe_load(f)
 
@@ -20,13 +23,23 @@ class HostConfig:
         self.ws_port: int = h.get("ws_port", 5001)
 
         n = data.get("network", {})
+        self.pi_ssh_user: str = n.get("pi_ssh_user", "tony")
         self.pi_address: str = n.get("pi_address", "127.0.0.1")
         self.pi_udp_port: int = n.get("pi_udp_port", 5100)
         self.pi_ws_port: int = n.get("pi_ws_port", 5101)
 
         go = data.get("gopro", {})
-        self.gopro_pi_url: str = go.get("pi_url", "http://192.168.20.51:8080")
+        self.gopro_pi_url: str = go.get("pi_url", "http://192.168.3.161:8080")
         self.gopro_real_host: str = go.get("real_host", "172.25.132.51")
+        self.gopro_preset_order: list[str] = go.get("preset_order", [])
+        self.gopro_model: str = go.get("model", "Mission 1 Pro")
+        self.gopro_expected_labs_version: str = go.get(
+            "expected_labs_version", "2.02.70")
+
+        light = data.get("lighting", {})
+        self.light_image_at_zero = float(light.get("image_at_zero_pwm", 20.0))
+        self.light_image_at_full = float(light.get("image_at_full_pwm", 0.0))
+        self.validate_lighting_range(self.light_image_at_zero, self.light_image_at_full)
 
         vi = data.get("video", {})
         self.stream_url: str = vi.get("stream_url", "")
@@ -42,6 +55,8 @@ class HostConfig:
 
         t = data.get("tracking", {})
         self.tracking_mode: str = t.get("mode", "fast")
+        self.inference_backend: str = t.get("inference_backend", "auto")
+        self.coreml_model_path: str = t.get("coreml_model_path", "")
         self.model_path: str = t.get("model_path", "")
         self.confidence_threshold: float = t.get("confidence_threshold", 0.5)
         self.iou_threshold: float = t.get("iou_threshold", 0.45)
@@ -93,6 +108,7 @@ class HostConfig:
         gi = data.get("gimbal", {})
         self.gimbal_yaw_max_angle: float = gi.get("yaw_max_angle", 15.0)
         self.gimbal_pitch_max_angle: float = gi.get("pitch_max_angle", 15.0)
+        self.gimbal_roll_max_angle: float = gi.get("roll_max_angle", 15.0)
 
         pl = data.get("plate", {})
         self.plate_max_angle: float = pl.get("max_angle", 45.0)
@@ -113,3 +129,26 @@ class HostConfig:
 
         os.makedirs(self.log_dir, exist_ok=True)
         os.makedirs(self.media_download_dir, exist_ok=True)
+
+    @staticmethod
+    def validate_lighting_range(zero: float, full: float):
+        if not (math.isfinite(zero) and math.isfinite(full) and 0 <= full < zero <= 100):
+            raise ValueError("Invalid fill light brightness range")
+
+    def save_lighting_range(self, zero: float, full: float):
+        self.validate_lighting_range(zero, full)
+        with self.config_path.open() as f:
+            data = yaml.safe_load(f) or {}
+        data.setdefault("lighting", {}).update(
+            image_at_zero_pwm=float(zero), image_at_full_pwm=float(full))
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                    dir=self.config_path.parent, delete=False) as f:
+                temp_path = Path(f.name)
+                yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+            os.replace(temp_path, self.config_path)
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+        self.light_image_at_zero, self.light_image_at_full = float(zero), float(full)

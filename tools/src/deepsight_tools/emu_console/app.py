@@ -184,7 +184,7 @@ class EmuConsoleWindow(QMainWindow):
     async def _async_init(self):
         self._proxy = UdpProxy(
             listen_port=5100,
-            pi_addr="192.168.1.100",
+            pi_addr="192.168.3.161",
             pi_port=5100,
             host_addr="127.0.0.1",
             host_port=5005,

@@ -33,7 +33,7 @@ class UdpProxy:
     Usage:
         proxy = UdpProxy(
             listen_port=5100,        # Host sends here
-            pi_addr="192.168.1.100", # Real Pi address
+            pi_addr="192.168.3.161", # Real Pi address
             pi_port=5100,            # Real Pi UDP port
         )
         proxy.set_injector(callback)  # called to get fake upstream messages

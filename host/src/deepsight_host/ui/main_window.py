@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt, QEvent, QTimer, Signal
+from PySide6.QtCore import Qt, QEvent, QProcess, QTimer, Signal
 from PySide6.QtGui import QKeyEvent, QAction
 from PySide6.QtWidgets import (
     QMainWindow,
+    QMessageBox,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -18,10 +19,13 @@ from PySide6.QtWidgets import (
     QApplication,
     QMenuBar,
     QMenu,
+    QScrollArea,
+    QLayout,
 )
 
 from deepsight_host.ui.styles import DARK_THEME
 from deepsight_host.ui.dashboard import DashboardWidget
+from deepsight_host.ui.lighting import LightingWidget
 from deepsight_host.ui.video_preview import VideoPreviewWidget
 from deepsight_host.ui.component_status import ComponentStatusWidget
 from deepsight_host.ui.gimbal_deflection import GimbalDeflectionWidget
@@ -154,6 +158,9 @@ class MainWindow(QMainWindow):
         self._tracking_view = TrackingViewWidget()
         right_top_layout.addWidget(self._tracking_view)
 
+        self.lighting = LightingWidget()
+        right_top_layout.addWidget(self.lighting)
+
         self._gimbal_deflection = GimbalDeflectionWidget()
         right_top_layout.addWidget(self._gimbal_deflection)
 
@@ -174,7 +181,21 @@ class MainWindow(QMainWindow):
 
         right_top_layout.addStretch()
 
-        top_hsplit.addWidget(right_top)
+        # Keep controls readable on short windows; E-stop stays visible.
+        right_top_layout.removeWidget(self._e_stop_btn)
+        right_top_layout.setSizeConstraint(QLayout.SetMinimumSize)
+        side_scroll = QScrollArea()
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setFrameShape(QScrollArea.NoFrame)
+        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        side_scroll.setWidget(right_top)
+        side_panel = QWidget()
+        side_panel.setMinimumWidth(300)
+        side_layout = QVBoxLayout(side_panel)
+        side_layout.setContentsMargins(0, 0, 0, 0)
+        side_layout.addWidget(side_scroll)
+        side_layout.addWidget(self._e_stop_btn)
+        top_hsplit.addWidget(side_panel)
         top_hsplit.setStretchFactor(0, 7)
         top_hsplit.setStretchFactor(1, 3)
 
@@ -192,7 +213,9 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self._component_status, 1)
 
         self._dashboard = DashboardWidget()
-        status_layout.addWidget(self._dashboard, 2)
+        self._dashboard.setMinimumWidth(380)
+        self._dashboard.setMaximumWidth(460)
+        status_layout.addWidget(self._dashboard, 0)
 
         bottom_hsplit.addWidget(status_widget)
 
@@ -231,25 +254,35 @@ class MainWindow(QMainWindow):
         settings_action.triggered.connect(self._open_settings)
         self._settings_menu.addAction(settings_action)
 
+        self._lighting_action = QAction(tr("menu.lighting_control"), self)
+        self._lighting_action.triggered.connect(self._open_lighting_control)
+        self._settings_menu.addAction(self._lighting_action)
         self._settings_menu.addSeparator()
 
         presets_action = QAction(tr("menu.gopro_presets"), self)
         presets_action.triggered.connect(self._open_gopro_presets)
         self._settings_menu.addAction(presets_action)
+        presets_action.setEnabled(False)
         self._presets_action = presets_action
 
         gopro_action = QAction(tr("menu.gopro_control"), self)
         gopro_action.triggered.connect(self._open_gopro_control)
         self._settings_menu.addAction(gopro_action)
-        gopro_action.setVisible(False)
+        gopro_action.setEnabled(False)
         self._gopro_action = gopro_action
         self._settings_action = settings_action
+
+        self._settings_menu.addSeparator()
+        self._pi_shutdown_action = QAction(tr("menu.pi_shutdown"), self)
+        self._pi_shutdown_action.setEnabled(False)
+        self._settings_menu.addAction(self._pi_shutdown_action)
 
         # ── Album menu ──
         self._album_menu = menu_bar.addMenu(tr("menu.album"))
         media_action = QAction(tr("menu.album_media"), self)
         media_action.triggered.connect(self._open_media_browser)
         self._album_menu.addAction(media_action)
+        media_action.setEnabled(False)
         self._media_action = media_action
 
         # ── About menu ──
@@ -259,6 +292,12 @@ class MainWindow(QMainWindow):
         from deepsight_host.ui.settings_dialog import SettingsDialog
         dlg = SettingsDialog(self.config, self)
         dlg.exec()
+
+    def _open_lighting_control(self):
+        from deepsight_host.ui.lighting_dialog import LightingDialog
+        dlg = LightingDialog(self.config, self)
+        if dlg.exec():
+            self.lighting.set_mapping(self.config.light_image_at_zero, self.config.light_image_at_full)
 
     def _open_gopro_control(self):
         from deepsight_host.ui.gopro_control_dialog import GoProControlDialog
@@ -318,6 +357,8 @@ class MainWindow(QMainWindow):
         return getattr(self, '_presets_dlg', None)
 
     def set_presets_result(self, presets: list[dict], active_preset_id: int):
+        active = next((p for p in presets if p.get("id") == active_preset_id), None)
+        self._video.set_preset(active)
         dlg = self.presets_dialog
         if dlg is not None:
             dlg.set_presets(presets, active_preset_id)
@@ -325,12 +366,19 @@ class MainWindow(QMainWindow):
     def set_gopro_status(self, data: dict):
         """Update component status widget with GoPro state."""
         if not data.get("online"):
+            self._gopro_action.setEnabled(False)
+            self._presets_action.setEnabled(False)
+            self._media_action.setEnabled(False)
             self.component_status.update_component(
                 "gopro", None, 0, tr("gopro.offline"))
             self._video.set_recording(False)
             self._video.set_battery(0)
+            self._video.set_preset(None)
             return
 
+        self._gopro_action.setEnabled(True)
+        self._presets_action.setEnabled(True)
+        self._media_action.setEnabled(True)
         bat = data.get("battery_pct", 0)
         recording = data.get("recording", False)
         self._video.set_recording(recording)
@@ -346,8 +394,18 @@ class MainWindow(QMainWindow):
         else:
             sd_str = "--"
 
-        self.component_status.update_component("gopro", SafetyState.NOMINAL, 0,
-            f"REC {rec}  {bat}%  SD {sd_str}")
+        remaining = int(data.get("remaining_video_time_s", 0))
+        duration = int(data.get("recording_duration_s", 0))
+        seconds = duration if recording else remaining
+        time_str = f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+        warning = data.get("overheating") or data.get("sd_write_error")
+        state = SafetyState.CAUTION if warning else SafetyState.NOMINAL
+        suffix = "  TEMP!" if data.get("overheating") else ""
+        if data.get("sd_write_error"):
+            suffix += "  SD ERR!"
+        self.component_status.update_component(
+            "gopro", state, 0,
+            f"REC {rec}  {bat}%  SD {sd_str}  {'DUR' if recording else 'LEFT'} {time_str}{suffix}")
 
     def _connect_gopro_signals(self):
         self.gopro_presets_loaded.connect(self.set_presets_result)
@@ -378,6 +436,8 @@ class MainWindow(QMainWindow):
 
     def set_config(self, config):
         self.config = config
+        self.lighting.set_mapping(config.light_image_at_zero, config.light_image_at_full)
+        self.tracking_view.set_mode(config.tracking_mode)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -406,6 +466,8 @@ class MainWindow(QMainWindow):
         self._album_menu.setTitle(tr("menu.album"))
         self._about_menu.setTitle(tr("menu.about"))
         self._settings_action.setText(tr("menu.settings_action"))
+        self._lighting_action.setText(tr("menu.lighting_control"))
+        self._pi_shutdown_action.setText(tr("menu.pi_shutdown"))
         self._presets_action.setText(tr("menu.gopro_presets"))
         self._gopro_action.setText(tr("menu.gopro_control"))
         self._media_action.setText(tr("menu.album_media"))
@@ -547,6 +609,44 @@ class MainWindow(QMainWindow):
         self._lock_label.style().unpolish(self._lock_label)
         self._lock_label.style().polish(self._lock_label)
         self._video.set_lock_overlay(locked)
+
+    def configure_pi_shutdown(self, address: str, user: str):
+        self._pi_shutdown_action.triggered.connect(
+            lambda: self._confirm_pi_shutdown(address, user))
+        self._pi_shutdown = QProcess(self)
+        self._pi_shutdown.finished.connect(self._pi_shutdown_finished)
+        self._pi_shutdown.errorOccurred.connect(self._pi_shutdown_error)
+        self._pi_shutdown_action.setEnabled(address not in ("", "localhost", "127.0.0.1", "::1"))
+
+    def _confirm_pi_shutdown(self, address: str, user: str):
+        answer = QMessageBox.question(
+            self, tr("menu.pi_shutdown"), tr("pi.shutdown_confirm").format(address=address),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._pi_shutdown_action.setEnabled(False)
+        self._pi_shutdown.start("ssh", [
+            "-n", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+            "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=3",
+            "-o", "ServerAliveCountMax=2", "-l", user, "--", address,
+            "sudo -n /usr/bin/systemctl poweroff --no-block",
+        ])
+
+    def _pi_shutdown_finished(self, code, status):
+        self._pi_shutdown_action.setEnabled(True)
+        if code == 0 and status == QProcess.ExitStatus.NormalExit:
+            self.set_status_message(tr("pi.shutdown_sent"))
+        else:
+            detail = bytes(self._pi_shutdown.readAllStandardError()).decode(errors="replace").strip()
+            logger.warning("Pi shutdown SSH exited with %s: %s", code, detail)
+            QMessageBox.warning(self, tr("menu.pi_shutdown"), tr("pi.shutdown_failed"))
+
+    def _pi_shutdown_error(self, error):
+        if error == QProcess.ProcessError.FailedToStart:
+            self._pi_shutdown_action.setEnabled(True)
+            QMessageBox.warning(self, tr("menu.pi_shutdown"), tr("pi.shutdown_failed"))
 
     def set_status_message(self, msg: str):
         self._status_bar.showMessage(msg)

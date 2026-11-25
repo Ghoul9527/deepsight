@@ -5,21 +5,22 @@ Distributed underwater ROV filming/tracking system for freediving. 4-node archit
 | Node | HW | Language | Purpose |
 |------|----|---------|---------|
 | Host | Laptop (macOS/Windows) | Python 3.11+ | GUI (PySide6), YOLO tracking, control |
-| Pi 5 | Raspberry Pi 5 | Python 3.11+ | GoPro control, HDMI capture, bridge routing |
+| Pi 5 | Raspberry Pi 5 | Python 3.11+ | MISSION 1 PRO gateway, bridge routing |
 | Pico | RP2040 | MicroPython | Sensors (IMU, depth, env), servos, lights |
 | STM32 | STM32F4 | C (HAL) | Winch motor control, emergency stop |
 
 ## Topology (wired only)
 
 ```
-GoPro USB-C ──▶ Pi USB 3.0 (control)
-GoPro MicroHDMI ──▶ Capture Dongle ──▶ Pi USB 3.0 (video)
+GoPro MISSION 1 PRO USB-C ──▶ Pi USB 3.0 (Open GoPro control + preview)
 Pi ──▶ RJ45 ──▶ Host (Ethernet)
 Pi ──▶ UART0 ──▶ Pico
 Pi ──▶ UART1 ──▶ STM32
 ```
 
-No BLE, no WiFi, no GoPro wireless preview. Video comes from HDMI capture card, not GoPro SDK.
+No BLE or WiFi control. The host uses the MISSION 1 PRO Open GoPro HTTP API
+through the Pi gateway; preview is relayed as UDP from the camera. Target Labs
+firmware is v2.02.70. See `docs/gopro_mission1_pro.md`.
 
 ## Communication
 

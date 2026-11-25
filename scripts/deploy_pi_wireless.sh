@@ -3,7 +3,7 @@
 # Run from the deepsight repo root
 
 set -e
-PI_HOST="${1:-192.168.20.14}"
+PI_HOST="${1:-192.168.3.161}"
 PI_USER="${2:-tony}"
 PI_DIR="/home/tony/deepsight"
 

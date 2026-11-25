@@ -45,7 +45,7 @@ class ControlLoop:
             "ax": 0.0, "ay": 0.0, "az": 0.0,
             "depth_m": 0.0, "pressure_mbar": 0.0, "water_temp_c": 0.0,
             "env_temp_c": 0.0, "humidity_pct": 0.0, "env_pressure_hpa": 0.0,
-            "leak": [False, False, False, False],
+            "leak": [False] * config.LEAK_CHANNELS,
         }
 
         # OTA receiver
@@ -212,8 +212,7 @@ class ControlLoop:
                 self._sensor_cache["humidity_pct"] = humidity
                 self._sensor_cache["env_pressure_hpa"] = pressure_hpa
             elif self._sensor_phase == 3:
-                for ch in range(4):
-                    self._sensor_cache["leak"][ch] = self.leak.is_wet(ch)
+                self._sensor_cache["leak"] = self.leak.read_all()
             self._sensor_ms = int((time.time() - t0) * 1000)
         except Exception:
             self._sensor_ms = -1

@@ -25,6 +25,12 @@ Host (Mac/Windows)  <--UDP/WS-->  Pi 5  <--UART-->  Pico
 | `pico/` | Servo/sensor control, deterministic loop | MicroPython |
 | `stm32/` | Winch control, hardware safety | C |
 
+## Camera target
+
+The active camera integration targets the fixed-lens **GoPro MISSION 1 PRO**
+with GoPro Labs firmware `v2.02.70`. Setup, firmware and API compatibility
+details are in [docs/gopro_mission1_pro.md](docs/gopro_mission1_pro.md).
+
 ## Development Phases
 
 - **Phase 1** (current): Skeleton, mock hardware, communication

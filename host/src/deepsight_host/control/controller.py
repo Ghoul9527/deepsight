@@ -4,12 +4,12 @@ All gamepad input flows through this layer. Business logic never touches pygame
 or raw button indices directly — everything is mapped through config.
 
 Backends (tried in order):
-  1. pygame (SDL2) — primary backend on Windows/Linux for all controllers.
-  2. GCController bridge (macOS) — native GameController.framework via signed
-     Swift helper. Apple Development signing is sufficient.
+  1. GCController bridge (macOS) — native GameController.framework via signed
+     Swift helper with background input enabled.
+  2. pygame (SDL2) — Windows/Linux and fallback.
   3. Chrome WebSocket bridge (macOS) — fallback using Chrome's Web Gamepad API.
      No signing required, but needs Chrome running.
-  4. F310 USB bridge — deprecated (broken on macOS 26+, kernel HIDRM block).
+  4. F310 USB bridge — legacy fallback.
 
 Architecture:
   GameController (this file)  →  signals  →  Host app / control pipeline
@@ -32,23 +32,13 @@ from PySide6.QtCore import QTimer, Signal, QObject
 
 logger = logging.getLogger("host.control.controller")
 
-# Chrome WebSocket bridge — macOS 26+ HIDRM workaround.
-# Uses Chrome's Web Gamepad API → local WebSocket → stdout JSON.
-# Chrome has Developer ID signing, bypassing HIDRM entirely.
-_CHROME_WS_BRIDGE_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))),
-    "scripts", "chrome_ws_bridge.py",
-)
-
-# F310 D-mode USB bridge — macOS-only fallback, F310-specific.
-# Installed by scripts/setup_f310_bridge.sh with setuid root.
+# Helpers are shipped alongside the Python package, including frozen builds.
+from pathlib import Path
+_GC_BRIDGE_PATH = str(Path(__file__).resolve().parents[1] / "native" /
+                      "DeepSightGamepad.app" / "Contents" / "MacOS" / "gc_bridge")
+_CHROME_WS_BRIDGE_PATH = str(Path(__file__).resolve().parents[4] / "scripts" /
+                             "chrome_ws_bridge.py")
 _USB_BRIDGE_PATH = "/usr/local/bin/deepsight_f310_bridge"
-
-# GCController bridge — macOS native GameController.framework.
-# Works with Apple Development signing (NSApplication run loop required).
-# Compiled Swift binary, outputs SDL2-compatible JSON to stdout.
-_GC_BRIDGE_PATH = "/usr/local/bin/deepsight_gc_bridge"
 
 
 class LockState(Enum):
@@ -271,118 +261,95 @@ class GameController(QObject):
         level = max(1, min(10, level))
         return 0.2 + (level / 5.0) * 0.8
 
-    # ── Bridge backends (macOS only) ──
-    #
-    # Both GCController bridge and F310 USB bridge output the same
-    # JSON format ({axes, buttons, hat}), so _read_bridge() and
-    # _poll_bridge() are shared.
-    #
-    # GC bridge: Apple GameController.framework via signed helper.
-    #   Needs one-time TCC permission grant.
-    # USB bridge: IOUSBHostDevice DeviceCapture, setuid root.
-    #   Last resort for F310 D-mode when GCController is blocked.
-
     def _try_start_bridge(self, path: str, name: str) -> bool:
-        """Spawn a bridge subprocess and read the first JSON line."""
-        if sys.platform != "darwin":
-            logger.debug("Bridge: not on macOS, skipping %s", name)
+        """Start a helper with bounded startup; a reader thread owns stdout."""
+        if sys.platform != "darwin" or not os.path.isfile(path):
             return False
-
-        if not os.path.exists(path):
-            logger.info("Bridge binary not found: %s", path)
-            return False
-
+        proc = None
+        ready = threading.Event()
         try:
-            # .py scripts need explicit interpreter; binaries run directly
             cmd = [sys.executable, path] if path.endswith(".py") else [path]
-            self._bridge_proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
-            # Stderr reader daemon thread — prevents pipe buffer fill
-            def _drain_stderr():
-                while self._bridge_proc and self._bridge_proc.poll() is None:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, bufsize=1)
+            self._bridge_proc = proc
+            self._bridge_last_seen = 0.0
+
+            def read_stdout():
+                for line in proc.stdout:
                     try:
-                        line = self._bridge_proc.stderr.readline()
-                        if line:
-                            logger.debug("Bridge stderr: %s", line.rstrip())
-                        else:
-                            break
-                    except Exception:
-                        break
+                        state = json.loads(line)
+                        if not isinstance(state, dict) or not isinstance(state.get("axes"), list):
+                            continue
+                        with self._bridge_lock:
+                            self._bridge_state = state
+                            self._bridge_last_seen = time.monotonic()
+                        ready.set()
+                    except (ValueError, TypeError):
+                        continue
 
-            stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
-            stderr_thread.start()
-            self._stderr_thread = stderr_thread
+            def read_stderr():
+                for line in proc.stderr:
+                    logger.debug("%s: %s", name, line.rstrip())
 
-            line = self._bridge_proc.stdout.readline()
-            if not line:
-                raise RuntimeError("Bridge produced no output")
-
-            state = json.loads(line)
-            with self._bridge_lock:
-                self._bridge_state = state
-
+            threading.Thread(target=read_stdout, daemon=True).start()
+            threading.Thread(target=read_stderr, daemon=True).start()
+            if not ready.wait(2.0) or proc.poll() is not None:
+                raise RuntimeError("helper startup timed out or exited")
             self._use_bridge = True
             self._bridge_name = name
-            logger.info("%s connected (%d buttons)", name, len(state.get("buttons", [])))
+            logger.info("Gamepad backend: %s (%s)", name, path)
             return True
-
-        except Exception as e:
-            logger.info("%s unavailable: %s", name, e)
-            if self._bridge_proc:
-                self._bridge_proc.terminate()
-                self._bridge_proc = None
+        except Exception as exc:
+            logger.info("%s unavailable: %s", name, exc)
+            if proc is not None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            self._bridge_proc = None
             return False
 
     def _read_bridge(self):
-        """Read available JSON lines from bridge stdout.
+        # Reader thread drains stdout even when video inference occupies Qt.
+        pass
 
-        Uses non-blocking I/O to drain all available lines without
-        blocking the Qt event loop. select() cannot be used here
-        because TextIOWrapper may have internally buffered data that
-        select() won't see on the kernel fd.
-        """
-        if not self._bridge_proc or self._bridge_proc.poll() is not None:
+    def _update_bridge_connection(self, connected: bool):
+        if connected == self._connected:
             return
-
-        try:
-            import os, fcntl
-            fd = self._bridge_proc.stdout.fileno()
-            fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-            fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-
-            while True:
-                line = self._bridge_proc.stdout.readline()
-                if not line:
-                    break
-                try:
-                    state = json.loads(line)
-                    with self._bridge_lock:
-                        self._bridge_state = state
-                except json.JSONDecodeError:
-                    pass
-        except BlockingIOError:
-            pass
-        except Exception:
-            pass
+        self._connected = connected
+        self._locked = True
+        self._smooth_winch = self._smooth_plate = 0.0
+        self._smooth_gimbal_pitch = self._smooth_gimbal_yaw = 0.0
+        self._winch_direction = 0.0
+        self._preset_press_time = None
+        self._preset_long_fired = False
+        # A held Start during USB reconnection must not unlock the system.
+        buttons = self._bridge_state.get("buttons", []) if connected else []
+        self._btn_prev = {
+            key: bool(buttons[idx]) if (idx := _get_button_idx(self._mapping, key))
+            is not None and 0 <= idx < len(buttons) else False
+            for key in self._btn_prev
+        }
+        self._dpad_state = {key: False for key in self._dpad_state}
+        self.winch_speed_changed.emit(0.0)
+        self.plate_yaw_changed.emit(0.0)
+        self.lock_state_changed.emit(LockState.LOCKED)
+        self.connection_changed.emit(connected)
+        logger.info("Gamepad %s — LOCKED", "connected" if connected else "disconnected")
 
     # ── Lifecycle ──
 
     def start(self) -> bool:
-        """Connect to a game controller, trying backends in order.
+        """Use bundled native input first on Mac; SDL handles other platforms."""
+        if self._try_start_bridge(_GC_BRIDGE_PATH, "GCController bridge"):
+            self._mapping = _match_mapping("Logitech F310", self._mappings)
+            self._locked = True
+            self._timer.start(1000 // self._poll_hz)
+            self._update_bridge_connection(bool(self._bridge_state.get("connected", False)))
+            return True
 
-        Backend priority:
-          1. pygame (SDL2) — primary on Windows/Linux.
-          2. Chrome WebSocket bridge (macOS) — Chrome's Web Gamepad API.
-             Needs Chrome page open with --disable-features=RestrictGamepadAccess.
-          3. GCController bridge (macOS) — native GameController.framework,
-             may connect but deliver zeros on macOS 26+.
-          4. F310 USB bridge — deprecated (macOS 26+ kernel HIDRM block).
-        """
         # ── Tier 1: pygame / SDL2 ──
         try:
             import pygame
@@ -425,17 +392,6 @@ class GameController(QObject):
             self.connection_changed.emit(True)
             return True
 
-        # ── Tier 3: GCController bridge (macOS, GameController.framework) ──
-        if self._try_start_bridge(
-            _GC_BRIDGE_PATH, "GCController bridge"
-        ):
-            self._mapping = _match_mapping(self._bridge_name, self._mappings)
-            self._connected = True
-            self._locked = True
-            self._timer.start(1000 // self._poll_hz)
-            self.connection_changed.emit(True)
-            return True
-
         # ── Tier 4: F310 USB bridge (deprecated, macOS 26+ HIDRM) ──
         if self._try_start_bridge(
             _USB_BRIDGE_PATH, "Logitech F310 (USB bridge)"
@@ -461,6 +417,7 @@ class GameController(QObject):
                 self._bridge_proc.wait(timeout=2)
             except Exception:
                 self._bridge_proc.kill()
+                self._bridge_proc.wait()
             self._bridge_proc = None
             logger.info("Bridge: disconnected")
         self._connected = False
@@ -470,12 +427,9 @@ class GameController(QObject):
     # ── Main poll loop ──
 
     def _poll(self):
-        if not self._connected:
-            return
-
         if self._use_bridge:
             self._poll_bridge()
-        elif self._joystick is not None:
+        elif self._connected and self._joystick is not None:
             self._poll_pygame()
 
     def _poll_pygame(self):
@@ -499,6 +453,13 @@ class GameController(QObject):
 
         with self._bridge_lock:
             state = dict(self._bridge_state)
+
+        if self._use_bridge:
+            healthy = (self._bridge_proc is not None and self._bridge_proc.poll() is None
+                       and time.monotonic() - self._bridge_last_seen < 1.0)
+            self._update_bridge_connection(healthy and bool(state.get("connected", True)))
+            if not self._connected:
+                return
 
         axes = state.get("axes", [0.0] * 6)
         buttons = state.get("buttons", [0] * 13)
@@ -623,6 +584,11 @@ class GameController(QObject):
             self.light_level_changed.emit(self._light_level)
             logger.info("Light: %d0%%", self._light_level)
 
+        # HUD only changes the display and remains available while locked.
+        if bridge_edge("hud") == 1:
+            self.hud_toggle.emit()
+            logger.info("Game controller: HUD toggle")
+
         # Suppress non-safety buttons when locked
         if self._locked:
             for name in self._btn_prev:
@@ -670,9 +636,6 @@ class GameController(QObject):
         if bridge_edge("record") == 1:
             self.record_toggle.emit()
             logger.info("Game controller: Record toggle")
-        if bridge_edge("hud") == 1:
-            self.hud_toggle.emit()
-            logger.info("Game controller: HUD toggle")
         if bridge_edge("roll_recenter") == 1:
             self.roll_recenter.emit()
             logger.info("Game controller: Roll recenter")
@@ -862,6 +825,11 @@ class GameController(QObject):
             self.light_level_changed.emit(self._light_level)
             logger.info("Light: %d0%%", self._light_level)
 
+        # HUD only changes the display and remains available while locked.
+        if edge("hud") == 1:
+            self.hud_toggle.emit()
+            logger.info("Game controller: HUD toggle")
+
         # ── Below this point, locked state suppresses all non-safety buttons ──
         if self._locked:
             for name in self._btn_prev:
@@ -924,9 +892,6 @@ class GameController(QObject):
             logger.info("Game controller: Record toggle")
 
         # ── X: HUD toggle ──
-        if edge("hud") == 1:
-            self.hud_toggle.emit()
-            logger.info("Game controller: HUD toggle")
 
         # ── Y: Roll recenter ──
         if edge("roll_recenter") == 1:

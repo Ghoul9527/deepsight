@@ -43,6 +43,8 @@ class BME280Driver(EnvSensorDriver):
         self._cal = {}  # Calibration coefficients parsed at init
 
     def init(self) -> bool:
+        if not config.BME280_ENABLED:
+            return False
         try:
             from machine import I2C, Pin
             self._i2c = I2C(

@@ -13,8 +13,13 @@ dependencies = [
     "numpy>=1.24",
     "pyyaml>=6.0",
     "aiohttp>=3.8",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "pytest-qt", "ruff", "mypy"]
+coreml = ["coremltools>=9.0; sys_platform == 'darwin'", "numpy<=2.3.5"]
 tracking = ["torch>=2.0", "ultralytics>=8.0", "boxmot>=10.0"]
+
+[tool.setuptools.package-data]
+deepsight_host = ["native/DeepSightGamepad.app/Contents/Info.plist", "native/DeepSightGamepad.app/Contents/MacOS/*", "native/DeepSightGamepad.app/Contents/_CodeSignature/*"]

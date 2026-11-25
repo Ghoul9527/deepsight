@@ -21,8 +21,12 @@ class PCA9685:
         self._freq = freq
         self._period_us = 1_000_000.0 / freq
 
-        self._write_reg(_MODE1, 0x00)  # reset
-        self.set_pwm_freq(freq)
+        try:
+            self._write_reg(_MODE1, 0x00)  # reset
+            self.set_pwm_freq(freq)
+        except Exception:
+            self._bus.close()
+            raise
 
     def set_pwm_freq(self, freq: float):
         self._freq = freq
@@ -59,6 +63,19 @@ class PCA9685:
         angle = max(min_deg, min(max_deg, angle))
         pulse_us = min_us + (angle - min_deg) / (max_deg - min_deg) * (max_us - min_us)
         self.set_pwm(channel, pulse_us)
+
+    def set_duty_cycle(self, channel: int, fraction: float) -> float:
+        """Set lighting duty, using explicit full-off/full-on endpoint bits."""
+        fraction = max(0.0, min(1.0, fraction))
+        counts = max(0, min(4096, round(fraction * 4096)))
+        if counts == 0:
+            data = [0, 0, 0, 0x10]
+        elif counts == 4096:
+            data = [0, 0x10, 0, 0]
+        else:
+            data = [0, 0, counts & 0xff, counts >> 8]
+        self._bus.write_i2c_block_data(self._addr, _LED0_ON_L + 4 * channel, data)
+        return counts / 4096 * 100
 
     def _write_reg(self, reg: int, value: int):
         self._bus.write_byte_data(self._addr, reg, value)

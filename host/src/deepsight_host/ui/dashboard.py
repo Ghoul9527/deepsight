@@ -30,7 +30,11 @@ class DashboardWidget(QWidget):
         root.setSpacing(2)
 
         grid = QGridLayout()
-        grid.setSpacing(2)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+        grid.setColumnStretch(3, 1)
 
         # Row 0: IMU (roll only)
         self._add_cell(grid, 0, 0, "dashboard.gyro")
@@ -42,27 +46,16 @@ class DashboardWidget(QWidget):
         self._add_metric(grid, 1, 2, "pressure", "mbar")
         self._add_metric(grid, 1, 3, "water_temp", "°C")
 
-        # Row 2: Light
-        self._add_cell(grid, 2, 0, "dashboard.light")
-        self._add_metric(grid, 2, 1, "lux", "lx")
+        # Brightness is computed from the preview image, not a lux sensor.
+        self._add_cell(grid, 2, 0, "dashboard.preview_brightness")
+        self._add_metric(grid, 2, 1, "frame_brightness", "%")
 
-        # Row 3: E-Bay (electronics bay)
-        self._add_cell(grid, 3, 0, "dashboard.ebay")
-        self._add_metric(grid, 3, 1, "ebay_pressure", "mbar")
-        self._add_metric(grid, 3, 2, "ebay_temp", "°C")
-        self._add_metric(grid, 3, 3, "ebay_humidity", "%")
+        self._add_cell(grid, 2, 2, "dashboard.light_pwm")
+        self._add_metric(grid, 2, 3, "light_pwm", "%")
 
-        # Row 4: Cam Bay
-        self._add_cell(grid, 4, 0, "dashboard.cambay")
-        self._add_metric(grid, 4, 1, "cambay_pressure", "mbar")
-        self._add_metric(grid, 4, 2, "cambay_temp", "°C")
-        self._add_metric(grid, 4, 3, "cambay_humidity", "%")
-
-        # Row 5: Tracking
-        self._add_cell(grid, 5, 0, "dashboard.tracking_title")
-        self._add_metric(grid, 5, 1, "confidence", "%")
-        self._add_metric(grid, 5, 2, "target_x", "")
-        self._add_metric(grid, 5, 3, "target_y", "")
+        self._add_cell(grid, 3, 0, "dashboard.leak")
+        self._add_metric(grid, 3, 1, "leak_ch0", "")
+        self._add_metric(grid, 3, 2, "leak_pi", "")
 
         root.addLayout(grid)
 
@@ -78,7 +71,7 @@ class DashboardWidget(QWidget):
         label = QLabel("---")
         label.setObjectName("value")
         label.setStyleSheet("font-size: 12px;")
-        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         grid.addWidget(label, row, col)
         self._labels[key] = label
         self._units[key] = unit
@@ -98,6 +91,17 @@ class DashboardWidget(QWidget):
     def _render_value(self, key: str, value):
         if key not in self._labels:
             return
+        if value is None:
+            self._labels[key].setText("---")
+            return
+        if key in ("leak_ch0", "leak_pi"):
+            wet = value == "WET"
+            source = "Pi" if key == "leak_pi" else "Pico"
+            status = tr("leak.wet") if wet else tr("leak.dry")
+            self._labels[key].setText(f"{source}: {status}")
+            color = "#ff5555" if wet else "#55bb77"
+            self._labels[key].setStyleSheet(f"font-size: 12px; font-weight: bold; color: {color};")
+            return
         if isinstance(value, float):
             if key in ("target_x", "target_y"):
                 num = f"{value:.4f}"
@@ -106,12 +110,12 @@ class DashboardWidget(QWidget):
             elif key in ("yaw", "pitch", "roll", "water_temp",
                          "ebay_temp", "cambay_temp", "env_temp"):
                 num = f"{value:.1f}"
-            elif key in ("depth", "lux"):
+            elif key in ("depth", "lux", "frame_brightness"):
                 num = f"{value:.1f}"
             elif key in ("pressure", "ebay_pressure", "cambay_pressure",
                          "env_pressure"):
                 num = f"{value:.0f}"
-            elif key in ("humidity", "ebay_humidity", "cambay_humidity"):
+            elif key in ("humidity", "ebay_humidity", "cambay_humidity", "light_pwm"):
                 num = f"{value:.0f}"
             else:
                 num = f"{value:.2f}"
@@ -121,8 +125,14 @@ class DashboardWidget(QWidget):
         label_key = self._metric_keys.get(key, "")
         metric_name = tr(label_key) if label_key else key
         unit = self._units.get(key, "")
-        text = f"{metric_name}: {num}{unit}"
+        text = f"{num}{unit}" if key in ("frame_brightness", "light_pwm") else f"{metric_name}: {num}{unit}"
         self._labels[key].setText(text)
+
+    def update_leak(self, node_id: str, channel: int, wet: bool):
+        if channel != 0 or node_id not in ("pi", "pico"):
+            return
+        key = "leak_pi" if node_id == "pi" else "leak_ch0"
+        self.update_value(key, "WET" if wet else "DRY")
 
     def update_imu(self, yaw: float, pitch: float, roll: float):
         self.update_value("roll", roll)

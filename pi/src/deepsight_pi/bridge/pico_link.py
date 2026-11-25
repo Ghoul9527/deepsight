@@ -33,6 +33,8 @@ class PicoLink:
         self._cmd_reader: asyncio.StreamReader | None = None
         self._cmd_writer: asyncio.StreamWriter | None = None
         self._telem_reader: asyncio.StreamReader | None = None
+        self._telem_writer = None
+        self._reconnect_delay = max(0.1, float(config.reconnect_delay_s))
         self._running = False
         self._recv_queue: asyncio.Queue[Message] = asyncio.Queue()
         self._recv_task: asyncio.Task | None = None
@@ -42,56 +44,47 @@ class PicoLink:
         return self._recv_queue
 
     async def start(self):
+        if self._running:
+            return
         self._running = True
         if self._cmd_port == "mock":
-            logger.info("PicoLink: mock mode (no serial)")
             return
+        self._recv_task = asyncio.create_task(self._supervise())
 
-        # Open command link (USB CDC) for sending
-        logger.info("PicoLink: cmd=%s telem=%s baud=%d hybrid=%s",
-                     self._cmd_port, self._telem_port, self._baud, self._hybrid)
-        try:
-            self._cmd_reader, self._cmd_writer = await open_serial_connection(
-                url=self._cmd_port,
-                baudrate=self._baud,
-                bytesize=8,
-                parity="N",
-                stopbits=1,
-            )
-            await asyncio.sleep(0.3)
+    async def _close_ports(self):
+        writers = [self._cmd_writer, self._telem_writer]
+        self._cmd_writer = self._telem_writer = None
+        self._cmd_reader = self._telem_reader = None
+        for writer in writers:
+            if writer is None:
+                continue
             try:
-                self._cmd_reader._transport.serial.reset_input_buffer()
+                writer.close()
+                await asyncio.wait_for(writer.wait_closed(), timeout=1)
             except Exception:
                 pass
-        except Exception as e:
-            logger.warning("PicoLink: failed to open cmd port %s — %s", self._cmd_port, e)
-            return
 
-        # Open telemetry link (GPIO UART) for receiving
-        if self._hybrid:
+    async def _supervise(self):
+        while self._running:
             try:
-                self._telem_reader, telem_writer = await open_serial_connection(
-                    url=self._telem_port,
-                    baudrate=self._baud,
-                    bytesize=8,
-                    parity="N",
-                    stopbits=1,
-                )
-                await asyncio.sleep(0.3)
-                try:
-                    self._telem_reader._transport.serial.reset_input_buffer()
-                except Exception:
-                    pass
-                logger.info("PicoLink: telemetry UART connected on %s", self._telem_port)
+                self._cmd_reader, self._cmd_writer = await open_serial_connection(
+                    url=self._cmd_port, baudrate=self._baud,
+                    bytesize=8, parity="N", stopbits=1)
+                if self._hybrid:
+                    self._telem_reader, self._telem_writer = await open_serial_connection(
+                        url=self._telem_port, baudrate=self._baud,
+                        bytesize=8, parity="N", stopbits=1)
+                logger.info("PicoLink: connected on %s", self._cmd_port)
+                await self._recv_loop()
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                logger.warning("PicoLink: failed to open telem port %s — %s", self._telem_port, e)
-                self._cmd_writer.close()
-                await self._cmd_writer.wait_closed()
-                self._cmd_writer = None
-                return
-
-        self._recv_task = asyncio.create_task(self._recv_loop())
-        logger.info("PicoLink: connected")
+                logger.warning("PicoLink disconnected: %s; retry in %.1fs",
+                               e, self._reconnect_delay)
+            finally:
+                await self._close_ports()
+            if self._running:
+                await asyncio.sleep(self._reconnect_delay)
 
     async def send(self, msg: Message):
         """Send a JSONL-encoded message to the Pico over USB CDC."""
@@ -103,10 +96,14 @@ class PicoLink:
         try:
             line = msg.to_json() + "\n"
             self._cmd_writer.write(line.encode("utf-8"))
-            await self._cmd_writer.drain()
+            await asyncio.wait_for(self._cmd_writer.drain(), timeout=2)
             logger.debug("PicoLink send: %s", msg.type)
         except Exception as e:
-            logger.error("PicoLink send error: %s", e)
+            logger.warning("PicoLink send failed; closing stale connection: %s", e)
+            writer = self._cmd_writer
+            self._cmd_writer = None
+            if writer is not None:
+                writer.close()
 
     async def _recv_loop(self):
         """Read JSONL lines from telemetry port, push parsed Messages to queue."""
@@ -122,15 +119,12 @@ class PicoLink:
             if loop_count <= 3 or loop_count % 50 == 0:
                 logger.debug("PicoLink recv_loop iter %d", loop_count)
             try:
-                line = await reader.readline()
+                line = await asyncio.wait_for(reader.readline(), timeout=5)
             except Exception as e:
-                logger.error("PicoLink read error: %s", e)
-                await asyncio.sleep(0.5)
-                continue
+                raise ConnectionError("serial read failed or timed out") from e
 
             if not line:
-                await asyncio.sleep(0.01)
-                continue
+                raise ConnectionError("serial EOF")
 
             logger.debug("PicoLink raw line: %r", line[:800])
             try:
@@ -144,8 +138,9 @@ class PicoLink:
         self._running = False
         if self._recv_task:
             self._recv_task.cancel()
+            try:
+                await self._recv_task
+            except asyncio.CancelledError:
+                pass
             self._recv_task = None
-        if self._cmd_writer:
-            self._cmd_writer.close()
-            await self._cmd_writer.wait_closed()
-            self._cmd_writer = None
+        await self._close_ports()

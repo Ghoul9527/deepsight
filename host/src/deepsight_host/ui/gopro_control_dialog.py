@@ -1,6 +1,6 @@
-"""GoPro Camera Control dialog — HERO13 settings from OpenGoPro HTTP API.
+"""GoPro Camera Control dialog — MISSION 1 PRO Open GoPro settings.
 
-Settings organized by mode (Video / Photo / Time Lapse / Other).
+Settings organized for the MISSION 1 PRO video workflow.
 Non-modal — every change sends immediately.  Combo boxes probe the camera
 for context-sensitive available options on first click.
 """
@@ -30,77 +30,40 @@ from deepsight_host.ui.i18n import I18n, tr
 logger = logging.getLogger("host.ui.gopro")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Mode → setting IDs (based on official OpenGoPro HERO13 API)
+# Mode → setting IDs (official MISSION 1 PRO Open GoPro HTTP API)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _MODE_VIDEO = "video"
-_MODE_PHOTO = "photo"
-_MODE_TIMELAPSE = "timelapse"
 _MODE_OTHER = "other"
 
 _MODE_TABS: list[tuple[str, str, list[int]]] = [
     # (mode_key, i18n_key, [setting_ids])
     (_MODE_VIDEO, "gopro.tab_video", [
+        239,  # General Sub Mode (dynamic for MISSION)
         2,    # Video Resolution
         3,    # Frames Per Second
         108,  # Video Aspect Ratio
         121,  # Video Lens
-        232,  # Video Framing
         135,  # Hypersmooth
-        150,  # Video Horizon Leveling
-        173,  # Video Performance Mode
+        150,  # Horizon Leveling
+        173,  # Performance Mode
+        180,  # System Video Mode
         182,  # Video Bit Rate
         183,  # Bit Depth
-        184,  # Profiles
-        180,  # System Video Mode
-        186,  # Video Easy Mode
+        184,  # Color Profile
         156,  # Video Duration
-    ]),
-    (_MODE_PHOTO, "gopro.tab_photo", [
-        122,  # Photo Lens
-        192,  # Multi Shot Aspect Ratio
-        233,  # Multi Shot Framing
-        234,  # Frame Rate
-        125,  # Photo Output
-        151,  # Photo Horizon Leveling
-        171,  # Photo Single Interval
-        172,  # Photo Interval Duration
-        177,  # Enable Night Photo
-        191,  # Easy Night Photo
-        227,  # Photo Mode
-    ]),
-    (_MODE_TIMELAPSE, "gopro.tab_timelapse", [
-        128,  # Media Format
-        187,  # Lapse Mode
-        5,    # Video Timelapse Rate
-        30,   # Photo Timelapse Rate
-        32,   # Nightlapse Rate
-        123,  # Time Lapse Digital Lenses
-        157,  # Multi Shot Duration
-        179,  # Star Trails Length
-        193,  # Framing
+        167,  # HindSight
+        256,  # Image Tuning
+        257,  # Subject Tracking
     ]),
     (_MODE_OTHER, "gopro.tab_other", [
-        175,  # Control Mode
-        176,  # Easy Mode Speed
-        43,   # Webcam Digital Lenses
-        194,  # Camera Mode
-        189,  # Max Lens Mod
-        190,  # Max Lens Mod Enable
-        162,  # Max Lens
-        167,  # HindSight
-        168,  # Scheduled Capture
         134,  # Anti-Flicker
         59,   # Auto Power Down
-        237,  # Auto Power On USB
-        236,  # Automatic Wi-Fi Access Point
-        178,  # Wireless Band
         83,   # GPS
         88,   # LCD Brightness
+        219,  # Screen Saver
         91,   # LED
         216,  # Beep Volume
-        219,  # Setup Screen Saver
-        223,  # Setup Language
     ]),
 ]
 
@@ -109,6 +72,36 @@ _MODE_TABS: list[tuple[str, str, list[int]]] = [
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _SETTINGS_DATA: dict[int, dict] = {
+    # MISSION's setting 239 replaces the legacy mode-specific preset groups.
+    239: {
+        "label": "General Sub Mode",
+        "options": [
+            ("12", "Standard"), ("13", "Stationary"),
+            ("15", "Looping"), ("16", "Photo"), ("19", "Burst"),
+            ("24", "Motion"), ("27", "Slo-Mo"),
+            ("29", "Star Trails"), ("30", "Light Painting"),
+            ("31", "Vehicle Lights"), ("32", "Burst Slo-Mo"),
+            ("36", "Low Light"), ("100", "Interval"),
+        ],
+    },
+    256: {
+        "label": "Image Tuning",
+        "options": [
+            ("0", "Dive"), ("1", "Face"), ("2", "Sport"),
+            ("3", "Balanced"),
+        ],
+    },
+    257: {
+        "label": "Subject Tracking",
+        "options": [("0", "Off"), ("1", "On")],
+    },
+    273: {
+        "label": "Output",
+        "options": [
+            ("0", "Video"), ("1", "Video + JPG"),
+            ("2", "Video + JPG + RAW"),
+        ],
+    },
     # ── Video ──
     2: {
         "label": "Video Resolution",
@@ -132,6 +125,8 @@ _SETTINGS_DATA: dict[int, dict] = {
             ("37", "4K 1:1"),
             ("38", "900"),
             ("39", "4K Sphere"),
+            ("40", "8K 4:3"),
+            ("44", "1440 4:3"),
             ("100", "5.3K"),
             ("107", "5.3K 8:7"),
             ("108", "4K 8:7"),
@@ -158,6 +153,9 @@ _SETTINGS_DATA: dict[int, dict] = {
             ("15", "400"),
             ("16", "360"),
             ("17", "300"),
+            ("18", "480"),
+            ("19", "960"),
+            ("20", "800"),
         ],
     },
     108: {
@@ -283,6 +281,7 @@ _SETTINGS_DATA: dict[int, dict] = {
             ("8", "2 Hours"),
             ("9", "3 Hours"),
             ("10", "5 Seconds"),
+            ("11", "10 Seconds"),
             ("100", "No Limit"),
         ],
     },
@@ -596,6 +595,7 @@ _SETTINGS_DATA: dict[int, dict] = {
             ("8", "ND 16"),
             ("9", "ND 32"),
             ("10", "Standard Lens"),
+            ("11", "ND 64"),
             ("100", "Auto Detect"),
         ],
     },
@@ -732,6 +732,51 @@ _SETTINGS_DATA: dict[int, dict] = {
     },
 }
 
+# These are conservative MISSION fallbacks for initial display. The camera's
+# runtime ``supported_options`` response replaces them when a control is opened,
+# because valid combinations depend on the active preset and firmware.
+_MISSION_OPTION_IDS: dict[int, set[int]] = {
+    2: {1, 9, 31, 40, 44, 109, 110, 112},
+    3: {0, 1, 2, 5, 6, 8, 9, 10, 13, 15, 18, 19, 20},
+    5: set(range(16)),
+    43: {0, 2, 3, 4},
+    59: {0, 1, 4, 6, 7},
+    83: {0, 1},
+    91: {3, 100},
+    108: {0, 1, 4},
+    121: {0, 3, 4, 10},
+    122: {101, 102},
+    123: {101, 102},
+    125: {0, 1, 3},
+    134: {0, 1},
+    135: {0, 1, 4},
+    156: {1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 100},
+    157: {1, 2, 3, 4, 5, 6, 7, 8, 9, 100},
+    167: {2, 3, 4},
+    171: {2, 3, 4, 5, 6, 7, 8, 9, 10},
+    172: set(range(10)),
+    178: {0, 1},
+    179: {1, 2, 3},
+    182: {0, 1, 2},
+    183: {0, 2},
+    189: {7, 8, 9, 10, 11, 100},
+    192: {0, 1},
+    216: {70, 85, 100},
+    223: set(range(15)),
+    239: {12, 13, 15, 27, 32, 36},
+    256: {0, 1, 2, 3},
+    257: {0, 1},
+    273: {0, 1, 2},
+}
+
+for _setting_id, _allowed_ids in _MISSION_OPTION_IDS.items():
+    _setting_data = _SETTINGS_DATA.get(_setting_id)
+    if _setting_data and _setting_data.get("options"):
+        _setting_data["options"] = [
+            option for option in _setting_data["options"]
+            if int(option[0]) in _allowed_ids
+        ]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Probe heuristic — pick an option from a different family to trigger error-3
@@ -754,7 +799,7 @@ def _pick_probe_option(sid: int, current_val: str) -> str:
     for prefix, probe_id in rules.get(sid, []):
         if prefix in current_val:
             return probe_id
-    return "1"
+    return "65535"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -776,7 +821,7 @@ class ProbeComboBox(QComboBox):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class GoProControlDialog(QDialog):
-    """HERO13 camera settings dialog — tabbed by mode, dynamically probed.
+    """MISSION 1 PRO settings dialog — tabbed by mode, dynamically probed.
 
     Non-modal. Every change sends immediately via ``command`` signal.
     Combo boxes dynamically probe available options on first click.
@@ -800,6 +845,7 @@ class GoProControlDialog(QDialog):
         self._widgets: dict[int, object] = {}
         self._probe_cache: dict[int, list[tuple[str, str]]] = {}
         self._probing: set[int] = set()
+        self._requested_initial_refresh = False
         self._tabs: dict[str, tuple[QScrollArea, QFormLayout]] = {}
 
         self._setup_ui()
@@ -811,20 +857,6 @@ class GoProControlDialog(QDialog):
         root = QVBoxLayout(self)
         root.setSpacing(8)
 
-        # ── Mode selector ──
-        mode_row = QHBoxLayout()
-        mode_lbl = QLabel(tr("settings.gopro_mode") + ":")
-        mode_lbl.setStyleSheet("font-weight: bold; font-size: 13px; color: #cccccc;")
-        mode_row.addWidget(mode_lbl)
-
-        self._gopro_mode = QComboBox()
-        self._gopro_mode.setMinimumWidth(200)
-        self._gopro_mode.addItems(["video", "photo", "timelapse"])
-        self._gopro_mode.currentTextChanged.connect(self._on_mode_changed)
-        mode_row.addWidget(self._gopro_mode)
-        mode_row.addStretch()
-        root.addLayout(mode_row)
-
         # ── Tab widget ──
         self._tab_widget = QTabWidget()
 
@@ -834,9 +866,6 @@ class GoProControlDialog(QDialog):
             idx = self._tab_widget.addTab(tab, tr(i18n_key))
             self._mode_tab_indices[mode_key] = idx
 
-        # Start with only Video + System tabs visible
-        self._show_mode_tabs("video")
-
         root.addWidget(self._tab_widget, 1)
 
         # ── Buttons ──
@@ -845,6 +874,9 @@ class GoProControlDialog(QDialog):
         self._status_lbl.setStyleSheet("color: #66cc66; font-size: 11px;")
         btn_row.addWidget(self._status_lbl)
         btn_row.addStretch()
+        self._refresh_btn = QPushButton(tr("gopro.refresh"))
+        self._refresh_btn.clicked.connect(lambda: self._send("get_settings", ""))
+        btn_row.addWidget(self._refresh_btn)
         self._close_btn = QPushButton(tr("gopro.close"))
         self._close_btn.clicked.connect(self.accept)
         btn_row.addWidget(self._close_btn)
@@ -922,25 +954,6 @@ class GoProControlDialog(QDialog):
         hbox.addStretch()
         return row
 
-    # ── Mode / tab switching ─────────────────────────────────────────────
-
-    def _on_mode_changed(self, mode: str):
-        if self._init:
-            return
-        self._send("preset_group", mode)
-        self._show_mode_tabs(mode)
-
-    def _show_mode_tabs(self, mode: str):
-        """Show only the selected mode tab + System tab; hide the rest."""
-        mode_keys = {"video", "photo", "timelapse"}
-        for mk, idx in self._mode_tab_indices.items():
-            if mk == mode:
-                self._tab_widget.setTabVisible(idx, True)
-                self._tab_widget.setCurrentIndex(idx)
-            elif mk in mode_keys:
-                self._tab_widget.setTabVisible(idx, False)
-            # System tab (other) always visible
-
     # ── Label helpers ────────────────────────────────────────────────────
 
     def _setting_label(self, sid: int, fallback: str) -> str:
@@ -977,8 +990,10 @@ class GoProControlDialog(QDialog):
         current_val = str(combo.currentData() or "")
 
         self._probing.add(sid)
+        combo.blockSignals(True)
         combo.addItem("⟳ Loading...", "__loading__")
         combo.setCurrentIndex(combo.count() - 1)
+        combo.blockSignals(False)
 
         probe_opt = _pick_probe_option(sid, current_val)
         self.probe_requested.emit(str(sid), probe_opt)
@@ -1005,7 +1020,15 @@ class GoProControlDialog(QDialog):
             info = _SETTINGS_DATA.get(sid, {})
             available = [{"id": v, "name": l} for v, l in info.get("options", [])]
 
+        if available is None:
+            return
+
         if not available:
+            combo.setEnabled(False)
+            lbl = self._current_labels.get(sid)
+            if lbl:
+                lbl.setText("→ Unsupported")
+            self._probe_cache[sid] = []
             return
 
         combo.blockSignals(True)
@@ -1039,11 +1062,12 @@ class GoProControlDialog(QDialog):
     def _send(self, setting: str, value: str):
         if self._init:
             return
-        self.command.emit("setting", setting, value)
         if setting == "get_settings":
+            self.command.emit("get_settings", "", "")
             self._status_lbl.setText(tr("gopro.refreshing"))
             return
         if setting == "preset_group":
+            self.command.emit("preset_group", "", value)
             mode_labels = {"video": tr("gopro.mode_video"),
                            "photo": tr("gopro.mode_photo"),
                            "timelapse": tr("gopro.mode_timelapse")}
@@ -1051,6 +1075,8 @@ class GoProControlDialog(QDialog):
             self._status_lbl.setText(
                 tr("gopro.sent_mode").format(mode=mode_name))
             return
+
+        self.command.emit("setting", setting, value)
 
         sid = int(setting)
         info = _SETTINGS_DATA.get(sid, {})
@@ -1099,6 +1125,9 @@ class GoProControlDialog(QDialog):
 
     def set_current_values(self, values: dict):
         """Called when tel_gopro_settings response arrives from Pi."""
+        values = values.get("settings", values.get("setting", values))
+        if not isinstance(values, dict):
+            return
         for sid_str, cur_val in values.items():
             try:
                 sid = int(sid_str)
@@ -1132,10 +1161,17 @@ class GoProControlDialog(QDialog):
     def set_status(self, text: str):
         self._status_lbl.setText(text)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._requested_initial_refresh:
+            self._requested_initial_refresh = True
+            self._send("get_settings", "")
+
     # ── i18n ─────────────────────────────────────────────────────────────
 
     def _on_lang_changed(self, lang: str):
         self.setWindowTitle(tr("gopro.title"))
+        self._refresh_btn.setText(tr("gopro.refresh"))
         self._close_btn.setText(tr("gopro.close"))
         for sid, lbl in self._setting_label_widgets.items():
             info = _SETTINGS_DATA.get(sid, {})

@@ -6,13 +6,13 @@ pi:
   ws_port: 5101
 
 network:
-  host_address: "192.168.20.50"
+  host_address: "192.168.3.158"
   host_udp_port: 5005
   host_ws_port: 5001
 
 serial:
-  pico_port: "/dev/ttyACM0"     # Pico USB CDC (runtime data: cmd + telemetry)
-  pico_telemetry_port: "/dev/ttyACM0"  # same as pico_port (no hybrid split)
+  pico_port: "/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_e6611032e3697231-if00"     # Pico USB CDC (runtime data: cmd + telemetry)
+  pico_telemetry_port: "/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_e6611032e3697231-if00"  # same as pico_port (no hybrid split)
   stm32_port: "/dev/ttyAMA1"    # STM32 UART (set "mock" for simulated winch)
   pico_baud: 115200
   stm32_baud: 115200
@@ -28,20 +28,28 @@ hardware:
     angle_max: 180.0
     default_angle: 90.0
     safety_timeout_s: 3.0
+  # Nominal physical travel: -175..+175 degrees; 1500us is neutral.
+  servo_calibration:
+    pulse_min_us: 500.0
+    pulse_neutral_us: 1500.0
+    pulse_max_us: 2500.0
+    physical_min_deg: -175.0
+    physical_max_deg: 175.0
+    neutral_command_deg: 90.0
   servos:
-    - {id: 0, channel: 0, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
-    - {id: 1, channel: 1, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
-    - {id: 2, channel: 2, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
-    - {id: 3, channel: 3, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
-    - {id: 4, channel: 4, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
+    - {id: 0, channel: 0, max_deflection_deg: 15.0, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
+    - {id: 1, channel: 1, max_deflection_deg: 15.0, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
+    - {id: 2, channel: 2, max_deflection_deg: 15.0, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
+    - {id: 3, channel: 3, max_deflection_deg: 45.0, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
+    - {id: 4, channel: 4, max_deflection_deg: 45.0, pulse_min_us: 500, pulse_max_us: 2500, angle_min: 0.0, angle_max: 180.0}
   lights:
     - {id: 0, channel: 5}
 
 stabilizer:
   roll:
-    enabled: true
+    enabled: false
     kp: 3.0
-    max_correction: 45.0
+    max_correction: 15.0
     manual_timeout_s: 2.0
     deadband_deg: 1.5
     ema_alpha: 0.12
@@ -49,7 +57,7 @@ stabilizer:
     ema_alpha: 0.12
 
 fin_coupling:
-  enabled: true
+  enabled: false
   yaw_max_deg: 15.0
   speed_min: 0.1
   speed_max: 2.0
@@ -65,3 +73,10 @@ watchdog:
 logging:
   level: "DEBUG"
   dir: "logs/pi/"
+
+# Local Pi leak alarm: BCM GPIO22 = physical pin 15; module powered at 3.3V.
+leak_sensor:
+  enabled: true
+  gpio: 22
+  active_high: true
+  poll_interval_s: 0.2

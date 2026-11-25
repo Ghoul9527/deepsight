@@ -59,7 +59,7 @@ class SettingsDialog(QDialog):
         net_layout.setSpacing(10)
 
         self._pi_ip = QLineEdit()
-        self._pi_ip.setPlaceholderText("192.168.20.51")
+        self._pi_ip.setPlaceholderText("192.168.3.161")
         net_layout.addRow(tr("settings.pi_ip"), self._pi_ip)
 
         self._udp_port = QSpinBox()
@@ -289,7 +289,7 @@ class SettingsDialog(QDialog):
 
         # Network
         old_pi = c.pi_address
-        c.pi_address = self._pi_ip.text().strip() or "192.168.20.51"
+        c.pi_address = self._pi_ip.text().strip() or "192.168.3.161"
         c.pi_udp_port = self._udp_port.value()
         c.pi_ws_port = self._ws_port.value()
         video_port = self._video_port.value()
@@ -381,6 +381,7 @@ class SettingsDialog(QDialog):
             "gimbal": {
                 "yaw_max_angle": c.gimbal_yaw_max_angle,
                 "pitch_max_angle": c.gimbal_pitch_max_angle,
+                "roll_max_angle": c.gimbal_roll_max_angle,
             },
             "plate": {
                 "max_angle": c.plate_max_angle,
@@ -396,13 +397,23 @@ class SettingsDialog(QDialog):
                 "telemetry_record": c.telemetry_record,
             },
         }
+        # Preserve sections not edited by this dialog (including lighting).
+        if CONFIG_PATH.exists():
+            with open(CONFIG_PATH) as f:
+                existing = yaml.safe_load(f) or {}
+            for key, values in data.items():
+                if isinstance(values, dict) and isinstance(existing.get(key), dict):
+                    existing[key].update(values)
+                else:
+                    existing[key] = values
+            data = existing
         with open(CONFIG_PATH, "w") as f:
             yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
         logger.info("Settings saved to %s", CONFIG_PATH)
 
     def _reset_defaults(self):
         """Reset all fields to default values."""
-        self._pi_ip.setText("192.168.20.51")
+        self._pi_ip.setText("192.168.3.161")
         self._udp_port.setValue(5100)
         self._ws_port.setValue(5101)
         self._video_port.setValue(8554)

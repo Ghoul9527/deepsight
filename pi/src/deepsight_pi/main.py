@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 import sys
 
 from deepsight_pi.config import PiConfig
@@ -13,6 +15,7 @@ from deepsight_pi.bridge.pico_link import PicoLink
 from deepsight_pi.bridge.stm32_link import Stm32Link
 from deepsight_pi.bridge.message_router import MessageRouter
 from deepsight_pi.watchdog import Watchdog
+from deepsight_pi.hardware.leak_sensor import PiLeakMonitor
 
 logger = logging.getLogger("pi")
 
@@ -31,6 +34,9 @@ class PiNode:
                                      stabilizer_config=self.config.stabilizer,
                                      fin_config=self.config.fin_coupling)
 
+        self.leak_monitor = PiLeakMonitor(
+            self.host_link, self.config.leak_sensor, self.config.pi_id)
+
         # API
         self.api = PiApi(self.config)
 
@@ -38,11 +44,19 @@ class PiNode:
         self.watchdog = Watchdog(self.config, self.host_link)
 
     def _setup_logging(self):
+        # Persist incidents independently of journald's high-volume debug stream.
+        path = Path(self.config.log_dir) / "deepsight-pi.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+        file_handler.setLevel(logging.INFO)
         logging.basicConfig(
             level=getattr(logging, self.config.log_level),
             format="[%(asctime)s] %(levelname)-8s [pi.%(name)s] %(message)s",
-            datefmt="%H:%M:%S",
+            datefmt="%Y-%m-%d %H:%M:%S",
+            handlers=[logging.StreamHandler(), file_handler],
         )
+        logger.info("Persistent log: %s (5 MiB x 4 files, INFO and above)", path.resolve())
 
     async def run(self):
         logger.info("Starting DeepSight Pi gateway...")
@@ -53,6 +67,7 @@ class PiNode:
         if self.config.stm32_port != "mock":
             await self.stm32_link.start()
 
+        await self.leak_monitor.start()
         await self.router.start()
         await self.watchdog.start()
         await self.api.start()
@@ -64,6 +79,7 @@ class PiNode:
         logger.info("Shutting down Pi gateway...")
         if hasattr(self, '_shutdown_event'):
             self._shutdown_event.set()
+        await self.leak_monitor.stop()
         await self.watchdog.stop()
         await self.router.stop()
         await self.host_link.stop()

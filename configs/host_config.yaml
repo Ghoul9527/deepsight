@@ -3,20 +3,35 @@ host:
   udp_port: 5005
   ws_port: 5001
 network:
-  pi_address: 192.168.20.51
+  pi_address: 192.168.3.161
   pi_udp_port: 5100
   pi_ws_port: 5101
+gopro:
+  preset_order:
+  - 水下通用1080p
+  - 水下通用4K
+  - 水下通用8K
+  - 水下4K 4:3 Log2
+  - 水下8K 4:3 Log2
+  - 水下地平线锁定1080p
+  - 水下地平线锁定4K
+  model: Mission 1 Pro
+  expected_labs_version: 2.02.70
+  pi_url: http://192.168.3.161:8080
+  real_host: 172.22.121.51
 video:
   stream_url: udp://0.0.0.0:8554
 mock:
   enabled: false
   video_source: file
-  video_file: "/Users/Tony/Downloads/deepsight_yolo_test/cwt_123m_edit.mov"
+  video_file: /Users/Tony/Downloads/deepsight_yolo_test/cwt_123m_edit.mov
   tracking_target: none
   frame_width: 854
   frame_height: 480
   fps: 30
 tracking:
+  inference_backend: coreml
+  coreml_model_path: models/freediver_s.mlpackage
   mode: fast
   model_path: models/freediver_s.pt
   confidence_threshold: 0.5
@@ -30,6 +45,7 @@ control:
   pos_deadband: 0.005
   out_ema_alpha: 0.5
 gimbal:
+  roll_max_angle: 15.0
   yaw_max_angle: 15.0
   pitch_max_angle: 15.0
 plate:
@@ -42,7 +58,6 @@ logging:
   level: DEBUG
   dir: logs/host/
   telemetry_record: false
-
 controller:
   poll_hz: 50
   dead_zone: 0.0
@@ -56,10 +71,18 @@ controller:
     generic:
       name_patterns: []
       axes:
-        winch: {axis: 1, invert: false}
-        plate_yaw: {axis: 0, invert: false}
-        gimbal_pitch: {axis: 3, invert: false}
-        gimbal_yaw: {axis: 2, invert: true}
+        winch:
+          axis: 1
+          invert: false
+        plate_yaw:
+          axis: 0
+          invert: false
+        gimbal_pitch:
+          axis: 3
+          invert: false
+        gimbal_yaw:
+          axis: 2
+          invert: true
       buttons:
         drop_to_3m: 4
         body_recenter: 8
@@ -75,7 +98,18 @@ controller:
         light_down: 11
         light_up: 12
       dpad:
-        winch_sens_up: [0, 1]
-        winch_sens_down: [0, -1]
-        plate_sens_left: [-1, 0]
-        plate_sens_right: [1, 0]
+        winch_sens_up:
+        - 0
+        - 1
+        winch_sens_down:
+        - 0
+        - -1
+        plate_sens_left:
+        - -1
+        - 0
+        plate_sens_right:
+        - 1
+        - 0
+lighting:
+  image_at_zero_pwm: 20.0
+  image_at_full_pwm: 0.0

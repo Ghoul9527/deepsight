@@ -5,7 +5,7 @@
 ### Confirmed
 | Item | Status | Notes |
 |------|--------|-------|
-| GoPro Hero 13 + Media Mod | Acquired | USB-C (control) + MicroHDMI (video) |
+| GoPro MISSION 1 PRO | Target | USB-C Open GoPro control + preview stream |
 | GoPro → Pi USB-C cable | Acquired | Wired control via HTTP |
 | GoPro → Capture dongle MicroHDMI | Acquired | Uncompressed video out |
 | HDMI capture dongle → Pi USB 3.0 | Acquired | Appears as /dev/video0 (UVC) |
@@ -147,13 +147,14 @@ video:
 
 ### Check GoPro USB control
 ```bash
-# Plug GoPro USB-C → Pi USB 3.0
+# Install MISSION 1 PRO Labs v2.02.70, then plug GoPro USB-C → Pi USB 3.0
 lsusb
-# Should show GoPro device (05ac:12ab or similar)
+# Discover the camera and configure the Pi gateway
+sudo ./scripts/setup_gopro_gateway.sh
 
-# Test wired control
-curl http://10.5.5.9/gp/gpControl/status
-# Should return JSON with camera status
+# Test current Open GoPro endpoints using the IP printed above
+curl http://CAMERA_USB_IP:8080/gopro/camera/info
+curl http://CAMERA_USB_IP:8080/gopro/camera/capabilities
 ```
 
 ### Check HDMI capture dongle

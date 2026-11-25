@@ -43,3 +43,10 @@ runs/
 *.mp4
 *.mov
 *.avi
+
+# Native Core ML export and isolated test runtime
+*.mlpackage/
+.venv-coreml/
+
+# Locally built and signed macOS gamepad helper
+host/src/deepsight_host/native/DeepSightGamepad.app/

@@ -32,6 +32,8 @@ class PiConfig:
         self.heartbeat_interval_s: float = w.get("heartbeat_interval_s", 0.5)
         self.reconnect_delay_s: float = w.get("reconnect_delay_s", 2.0)
 
+        self.leak_sensor: dict = data.get("leak_sensor", {})
+
         self.hardware: dict = data.get("hardware", {})
         self.stabilizer: dict = data.get("stabilizer", {})
         self.fin_coupling: dict = data.get("fin_coupling", {})

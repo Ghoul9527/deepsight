@@ -28,11 +28,17 @@ class PreciseModeTracker(TrackingEngine):
                  model_name: str = "yolov8s.pt",
                  model_path: str = "",
                  inference_size: int = 960,
-                 motion_predict_ms: float = 10000):
+                 motion_predict_ms: float = 10000,
+                 inference_backend: str = "auto",
+                 coreml_model_path: str = ""):
         self._conf = confidence_threshold
         self._iou = iou_threshold
         self._model_name = model_name
         self._model_path = model_path
+        self._inference_backend = inference_backend
+        self._coreml_model_path = coreml_model_path
+        self._predict_kwargs = {}
+        self.backend_label = "unavailable"
         self._model = None
         self._mock = True
         self._frame_count = 0
@@ -67,22 +73,18 @@ class PreciseModeTracker(TrackingEngine):
 
     def _init_model(self):
         try:
-            from ultralytics import YOLO
-            import torch
-
-            if torch.cuda.is_available():
-                self._device = "cuda"
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                self._device = "mps"
-            else:
-                self._device = "cpu"
-
+            from deepsight_host.tracking.inference import load_detector
             model = self._model_path or self._model_name
-            self._model = YOLO(model)
+            self._model, self._device, self._predict_kwargs, self.backend_label = load_detector(
+                model, self._inference_backend, self._coreml_model_path)
             self._mock = False
-            logger.info("PreciseMode: loaded %s (device=%s, imgsz=%d)",
-                         model, self._device, self._inference_size)
+            logger.info("PreciseMode: loaded %s (backend=%s, preprocessing_device=%s, imgsz=%d)",
+                         self._coreml_model_path if self._inference_backend == "coreml" else model,
+                         self.backend_label, self._device,
+                         self._predict_kwargs.get("imgsz", self._inference_size))
         except Exception as e:
+            if self._inference_backend == "coreml":
+                raise RuntimeError(f"Core ML initialization failed: {e}") from e
             logger.warning("PreciseMode: YOLO unavailable (%s), using synthetic", e)
             self._device = "cpu"
 
@@ -145,6 +147,7 @@ class PreciseModeTracker(TrackingEngine):
                 classes=[PERSON_CLASS],
                 verbose=False,
                 device=self._device,
+                **self._predict_kwargs,
             )
         except Exception as e:
             logger.error("YOLO tracking error: %s", e)

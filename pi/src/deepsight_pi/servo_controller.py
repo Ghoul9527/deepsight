@@ -4,6 +4,7 @@ import logging
 import time
 
 from deepsight_pi.hardware.pca9685 import PCA9685
+from deepsight_pi.servo_calibration import DEFAULT_CALIBRATION, DEFAULT_DEFLECTION_LIMITS, calibrated_pulse
 
 logger = logging.getLogger("pi.servo")
 
@@ -16,6 +17,7 @@ class ServoController:
             address=pca.get("i2c_address", 0x40),
             freq=pca.get("pwm_freq", 50),
         )
+        self._calibration = {**DEFAULT_CALIBRATION, **hardware_config.get("servo_calibration", {})}
         self._min_us = pca.get("pulse_min_us", 500)
         self._max_us = pca.get("pulse_max_us", 2500)
         self._min_deg = pca.get("angle_min", 0.0)
@@ -29,6 +31,7 @@ class ServoController:
 
         # Lighting channels: {channel: max_brightness}
         self._light_channels: dict[int, dict] = {}
+        self._light_pwm_percent: dict[int, float] = {}
         for ch_cfg in hardware_config.get("lights", []):
             lid = ch_cfg["id"]
             self._light_channels[lid] = ch_cfg
@@ -38,13 +41,29 @@ class ServoController:
         self._last_command = time.time()
         self._safety_triggered = False
 
-        # Initialize all servos to default
-        for sid in self._servo_channels:
-            self.set_angle(sid, self._default_angle)
+        try:
+            self._initialize_outputs()
+        except Exception:
+            self._pca.close()
+            raise
 
         logger.info("ServoController: %d servos, %d lights, addr=0x%02X",
                      len(self._servo_channels), len(self._light_channels),
                      pca.get("i2c_address", 0x40))
+
+    def _initialize_outputs(self):
+        for sid in self._servo_channels:
+            self.set_angle(sid, self._default_angle)
+        for lid in self._light_channels:
+            self.set_brightness(lid, 0.0)
+        self._last_command = time.time()
+        self._safety_triggered = False
+
+    def recover(self):
+        """Reapply device setup after a disconnect/power loss."""
+        self._pca._write_reg(0x00, 0x00)
+        self._pca.set_pwm_freq(self._pca._freq)
+        self._initialize_outputs()
 
     def set_angle(self, servo_id: int, angle: float):
         ch_cfg = self._servo_channels.get(servo_id)
@@ -52,15 +71,14 @@ class ServoController:
             logger.warning("Unknown servo: %d", servo_id)
             return
 
-        a_min = ch_cfg.get("angle_min", self._min_deg)
-        a_max = ch_cfg.get("angle_max", self._max_deg)
-        p_min = ch_cfg.get("pulse_min_us", self._min_us)
-        p_max = ch_cfg.get("pulse_max_us", self._max_us)
-
-        angle = max(a_min, min(a_max, angle))
+        calibration = {**self._calibration}
+        for key in DEFAULT_CALIBRATION:
+            if key in ch_cfg:
+                calibration[key] = ch_cfg[key]
+        limit = ch_cfg.get("max_deflection_deg", DEFAULT_DEFLECTION_LIMITS.get(servo_id, 15.0))
+        pulse = calibrated_pulse(float(angle), calibration, float(limit))
         ch = ch_cfg.get("channel", servo_id)
-        self._pca.set_angle(ch, angle, min_us=p_min, max_us=p_max,
-                            min_deg=a_min, max_deg=a_max)
+        self._pca.set_pwm(ch, pulse)
         self._last_command = time.time()
         self._safety_triggered = False
 
@@ -72,10 +90,12 @@ class ServoController:
 
         brightness = max(0.0, min(1.0, brightness))
         ch = ch_cfg.get("channel", light_id)
-        # Map 0.0-1.0 to 0-4095 PWM duty
-        pulse_us = brightness * self._pca._period_us
-        self._pca.set_pwm(ch, pulse_us)
+        # Update reported state only after a successful hardware write.
+        self._light_pwm_percent[light_id] = self._pca.set_duty_cycle(ch, brightness)
         self._last_command = time.time()
+
+    def get_light_pwm_percent(self, light_id: int = 0) -> float | None:
+        return self._light_pwm_percent.get(light_id)
 
     def check_safety(self) -> bool:
         """Return True if safety timeout triggered (servos reset to default)."""

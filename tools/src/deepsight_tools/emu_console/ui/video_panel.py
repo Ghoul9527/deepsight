@@ -54,7 +54,7 @@ class VideoPanel(QWidget):
         self._pi_label = QLabel("Pi:")
         self._pi_label.setStyleSheet("font-size: 10px; color: #8888aa;")
         self._pi_row.addWidget(self._pi_label)
-        self._pi_host = QLineEdit("192.168.1.100")
+        self._pi_host = QLineEdit("192.168.3.161")
         self._pi_host.setStyleSheet("font-size: 10px; max-width: 120px;")
         self._pi_row.addWidget(self._pi_host)
         self._pi_port = QLineEdit("8554")
